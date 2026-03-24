@@ -43,7 +43,11 @@ std::shared_ptr<InfinilmModel> InfinilmModelFactory::createModel(
     const cache::CacheConfig *cache,
     backends::AttentionBackend attention_backend) {
 
-    const auto model_type = model_config->get<std::string>("model_type");
+    const auto model_type = model_config->get_or<std::string>("model_type", "");
+    if (model_type.empty()) {
+        throw std::invalid_argument(
+            "InfinilmModelFactory::createModel: 'model_type' field is missing or empty in config");
+    }
     static const std::unordered_set<std::string> llama_compatible = {
         "llama", "qwen2", "qwen3", "minicpm", "fm9g", "fm9g7b"
     };
