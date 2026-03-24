@@ -102,7 +102,7 @@ private:
                                 const infinicore::Tensor &position_ids,
                                 std::shared_ptr<infinilm::cache::Cache> kv_cache,
                                 std::optional<infinicore::Tensor> past_sequence_lengths,
-                                std::optional<infinicore::Tensor> total_sequence_lengths) const;
+                                size_t total_seq_len) const;
 
     infinicore::Tensor forward_paged_(const infinicore::Tensor &hidden_states,
                                       const infinicore::Tensor &position_ids,
