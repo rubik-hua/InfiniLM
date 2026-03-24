@@ -1,4 +1,5 @@
 #include "model_factory.hpp"
+#include <unordered_set>
 #include "llama/llama_for_causal_lm.hpp"
 #include "models_registry.hpp"
 
@@ -41,12 +42,19 @@ std::shared_ptr<InfinilmModel> InfinilmModelFactory::createModel(
     engine::distributed::RankInfo rank_info,
     const cache::CacheConfig *cache,
     backends::AttentionBackend attention_backend) {
+
+    const auto model_type = model_config->get<std::string>("model_type");
+    static const std::unordered_set<std::string> llama_compatible = {
+        "llama", "qwen2", "qwen3", "minicpm", "fm9g", "fm9g7b"
+    };
+
     std::shared_ptr<InfinilmModel> model;
-    if (true) {
+    if (llama_compatible.count(model_type)) {
         model = std::make_shared<models::llama::LlamaForCausalLM>(
             model_config, rank_info.device, rank_info, attention_backend);
     } else {
-        throw std::invalid_argument("InfinilmModelFactory::createModel: Unsupported model config type");
+        throw std::invalid_argument(
+            "InfinilmModelFactory::createModel: Unsupported model_type '" + model_type + "'");
     }
 
     if (cache) {
