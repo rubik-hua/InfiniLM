@@ -42,11 +42,8 @@ void *MemoryPool::alloc(size_t size) {
     _free_blocks.erase(it);
     _all_blocks.erase(block_it);
 
-    // Align the pointer within the block
-    size_t alignment_padding = reinterpret_cast<char *>(block.ptr) - reinterpret_cast<char *>(block.ptr);
-
-    // Calculate remaining space after allocation
-    const size_t remaining = block.size - aligned_size - alignment_padding;
+    // Calculate remaining space after aligned allocation
+    const size_t remaining = block.size - aligned_size;
 
     // Create allocated block
     Block alloc_block(block.base, block.ptr, aligned_size, false);
@@ -89,9 +86,7 @@ void *MemoryPool::allocateNewRegion(size_t size) {
     RUN_INFINI(infinirtMalloc(&ptr, size));
     _base_regions.push_back(ptr);
 
-    // Align the pointer within the allocated region
-    size_t alignment_padding = reinterpret_cast<char *>(ptr) - reinterpret_cast<char *>(ptr);
-    size_t usable_size = size - alignment_padding;
+    const size_t usable_size = size;
 
     Block new_block(ptr, ptr, usable_size, true);
     auto it = _all_blocks.insert(new_block).first;
