@@ -121,6 +121,12 @@ public:
         }
     }
 
+    // Public accessors for cache/utility functions that need model state
+    int            ndev()          const { return static_cast<int>(dev_ids_.size()); }
+    infiniDevice_t dev_type()      const { return device_; }
+    int            dev_id(int idx) const { return dev_ids_[idx]; }
+    const Meta&    meta()          const { return meta_; }
+
 protected:
     // ── Subclass interface (pure virtual) ────────────────────────────────────
 
