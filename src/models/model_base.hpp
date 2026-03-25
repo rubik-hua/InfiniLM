@@ -146,10 +146,10 @@ protected:
 
     // Copy req into req_, signal all device threads, and wait until all finish.
     void dispatch(const Request &req) {
-        req_ = req;
         int ndev = static_cast<int>(dev_ids_.size());
         for (int idev = 0; idev < ndev; idev++) {
             std::unique_lock<std::mutex> lock(states_[idev].mtx);
+            if (idev == 0) req_ = req;  // synchronised via states_[0].mtx
             states_[idev].proceed = true;
             lock.unlock();
             states_[idev].cv_start.notify_one();
@@ -211,10 +211,13 @@ private:
                 [&] { return states_[idev].proceed || states_[idev].exit_flag; });
             if (states_[idev].exit_flag) break;
 
+            lock.unlock();  // release lock before long GPU work
             inferDeviceBatch(dev_resources_[idev], idev, ndev, req_);
 
-            states_[idev].proceed = false;
-            lock.unlock();
+            {
+                std::unique_lock<std::mutex> done_lock(states_[idev].mtx);
+                states_[idev].proceed = false;
+            }
             states_[idev].cv_done.notify_one();
         }
 
