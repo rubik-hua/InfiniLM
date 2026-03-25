@@ -17,3 +17,6 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/InfiniTensor/InfiniLM"
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]
