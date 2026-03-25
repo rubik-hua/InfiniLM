@@ -17,74 +17,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from infinilm.llm import AsyncLLMEngine, SamplingParams, FinishReason
+from infinilm.utils.openai_format import chunk_json, completion_json
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_TIMEOUT = 100.0
 DEFAULT_REQUEST_TIMEOUT = 1000.0
-
-
-def chunk_json(
-    id_, content=None, role=None, finish_reason=None, model: str = "unknown"
-):
-    """Generate JSON chunk for streaming response."""
-    delta = {}
-    if content:
-        delta["content"] = content
-    if role:
-        delta["role"] = role
-    return {
-        "id": id_,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "system_fingerprint": None,
-        "choices": [
-            {
-                "index": 0,
-                "text": content,
-                "delta": delta,
-                "logprobs": None,
-                "finish_reason": finish_reason,
-            }
-        ],
-    }
-
-
-def completion_json(
-    id_,
-    content,
-    role="assistant",
-    finish_reason="stop",
-    model: str = "unknown",
-    prompt_tokens: int = 0,
-    completion_tokens: int = 0,
-    total_tokens: int = 0,
-):
-    """Generate JSON response for non-streaming completion."""
-    return {
-        "id": id_,
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "system_fingerprint": None,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": role,
-                    "content": content,
-                },
-                "logprobs": None,
-                "finish_reason": finish_reason,
-            }
-        ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        },
-    }
 
 
 class InferenceServer:
