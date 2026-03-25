@@ -274,4 +274,3 @@ class GenerationMixin:
             "total_input_tokens": batch_size * seq_len,
             "total_output_tokens": len(time_list),
         }
-        return output_tokens_list, output_content

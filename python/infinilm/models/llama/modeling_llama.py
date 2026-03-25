@@ -369,11 +369,8 @@ class LlamaModel(infinicore.nn.Module):
         # --------------------------------------------------------- #
         #                    decoder_layer
         # --------------------------------------------------------- #
-        ilayer = 0  # noqa: F841
         hidden_states = inputs_embeds
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            # print("ilayer: ", ilayer)
-            # ilayer += 1
             hidden_states = decoder_layer(
                 hidden_states,
                 past_key_values=past_key_values,
