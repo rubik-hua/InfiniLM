@@ -401,7 +401,7 @@ infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_stat
     if (auto paged_kv_cache = std::dynamic_pointer_cast<cache::PagedKVCache>(kv_cache)) {
         output = forward_paged_(hidden_states, position_ids, paged_kv_cache, total_sequence_lengths, input_offsets, cu_seqlens, block_tables, slot_mapping);
     } else {
-        size_t total_seq_len = 0;
+        size_t total_seq_len = hidden_states->shape()[1]; // fallback: full input seq len
         if (total_sequence_lengths.has_value()) {
             total_seq_len = static_cast<size_t>(reinterpret_cast<const int32_t *>(
                 total_sequence_lengths.value()->to(infinicore::Device::cpu())->data())[0]);
