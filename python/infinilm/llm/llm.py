@@ -530,7 +530,7 @@ class AsyncLLMEngine:
         tensor_parallel_size: int = 1,
         cache_type: str = "paged",
         max_batch_size: int = 16,
-        max_tokens: int = 512,
+        max_tokens: int = 4096,
         num_blocks: int = 512,
         block_size: int = 256,
         max_cache_len: int = 4096,
