@@ -3,80 +3,48 @@
 
 #include "../../cache.hpp"
 #include "../../dataloader/weights_loader.hpp"
+#include "../model_base.hpp"
 
-#include <condition_variable>
-#include <mutex>
-#include <thread>
+#include <memory>
 
 struct QuantInt4Weight {
-    std::shared_ptr<Tensor> w, s, z, g_idx;  // add g_idx
+    std::shared_ptr<Tensor> w, s, z, g_idx;  // g_idx distinguishes GPTQ from AWQ
 };
 
 struct JiugeGPTQDeviceWeight {
-    std::shared_ptr<Tensor> w_in_embd, w_out_norm, w_out_embd, sin_table,
-        cos_table;
+    std::shared_ptr<Tensor> w_in_embd, w_out_norm, w_out_embd, sin_table, cos_table;
     std::vector<std::shared_ptr<Tensor>> w_attn_norm, b_attn_q, b_attn_k, b_attn_v, w_ffn_norm;
-    std::vector<std::shared_ptr<QuantInt4Weight>> w_attn_q, w_attn_k, w_attn_v, w_attn_out, w_ffn_gate, w_ffn_up, w_ffn_down;
+    std::vector<std::shared_ptr<QuantInt4Weight>> w_attn_q, w_attn_k, w_attn_v,
+        w_attn_out, w_ffn_gate, w_ffn_up, w_ffn_down;
 };
 
 class JiugeGPTQWeights : public infinicore::weights::Loader {
 private:
     std::vector<std::shared_ptr<JiugeGPTQDeviceWeight>> _device_weights;
-
 public:
-    JiugeGPTQWeights(const JiugeGPTQMeta *meta,
-                    infiniDevice_t device,
-                    const std::vector<int> &dev_ids);
+    JiugeGPTQWeights(const JiugeGPTQMeta *meta, infiniDevice_t device,
+                     const std::vector<int> &dev_ids);
     std::vector<std::shared_ptr<JiugeGPTQDeviceWeight>> &device_weights() {
         return _device_weights;
     }
 };
 
-struct GPTQDeviceResource {
-    // Device
-    infiniDevice_t device;
-    int device_id;
-    infiniopHandle_t handle;
-    // Weights
+struct GPTQDeviceResource : public DeviceResourceBase {
     std::shared_ptr<JiugeGPTQDeviceWeight> weights;
-    // Streams
-    infinirtStream_t stream;
-    // Communicator
-    infinicclComm_t comm;
-
-    std::shared_ptr<MemoryPool> memory_pool;
 };
 
-struct InferRequest {
-    const uint32_t *tokens;
-    uint32_t ntok;
-    const uint32_t *req_lens;
-    uint32_t nreq;
-    const uint32_t *req_pos;
-    struct KVCache **kv_caches;
-    const float *temperature;
-    const uint32_t *topk;
-    const float *topp;
-    uint32_t *output;
-    void *logits;
-};
+struct JiugeGPTQModel : public ModelBase<JiugeGPTQMeta, GPTQDeviceResource> {
+    JiugeGPTQModel(const JiugeGPTQMeta *meta, const ModelWeights *weights);
 
-struct InferState {
-    std::mutex mtx;
-    std::condition_variable cv_load, cv_start, cv_done;
-    bool loaded = false;
-    bool proceed = false;
-    bool exit_flag = false;
-};
+protected:
+    void createDeviceResource(GPTQDeviceResource *rsrc,
+                              int idev, int ndev,
+                              int dev_id, infinicclComm_t comm) override;
+    void releaseDeviceResource(GPTQDeviceResource &rsrc) override;
+    void inferDeviceBatch(GPTQDeviceResource &rsrc,
+                          int idev, int ndev,
+                          const BaseInferRequest &req) override;
 
-struct JiugeGPTQModel {
-    JiugeGPTQMeta meta;
-    infiniDevice_t device;
-    std::vector<int> dev_ids;
-    std::vector<GPTQDeviceResource> dev_resources;
-    std::vector<InferState> states;
-    std::vector<std::thread> threads;
-    InferRequest req;
-
-    JiugeGPTQModel(const JiugeGPTQMeta *, const ModelWeights *);
+private:
+    const ModelWeights *weights_;
 };
