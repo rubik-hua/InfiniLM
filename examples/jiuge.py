@@ -1,8 +1,8 @@
 import infinicore
 import transformers
 from transformers import AutoTokenizer
-from tokenizers import decoders as _dec
 from infinilm.modeling_utils import load_model_state_dict_by_file
+from infinilm.utils.tokenizer import fix_llama_tokenizer_decoder
 from infinilm.distributed import DistConfig
 from infinilm.infer_engine import GenerationConfig, InferEngine
 import argparse
@@ -56,23 +56,7 @@ def test(
     #                        create tokenizer
     # ---------------------------------------------------------------------------- #
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    if "llama" == model.model_type:
-        backend = getattr(tokenizer, "backend_tokenizer", None)
-        target = getattr(backend, "_tokenizer", backend)
-        norm = getattr(target, "normalizer", None)
-        dec = getattr(target, "decoder", None)
-        sn = repr(norm)[:800] if norm is not None else ""
-        sd = repr(dec)[:800] if dec is not None else ""
-        has_prepend = "Prepend" in sn
-        has_strip = "Strip" in sd
-        if has_prepend and has_strip:
-            target.decoder = _dec.Sequence(
-                [
-                    _dec.Replace("▁", " "),
-                    _dec.ByteFallback(),
-                    _dec.Fuse(),
-                ]
-            )
+    fix_llama_tokenizer_decoder(tokenizer, model.model_type)
 
     # ---------------------------------------------------------------------------- #
     #                        tokenize

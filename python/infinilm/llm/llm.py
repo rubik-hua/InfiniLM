@@ -15,7 +15,7 @@ from typing import List, Optional, Union, AsyncIterator
 from dataclasses import dataclass
 
 from transformers import AutoTokenizer
-from tokenizers import decoders as _dec
+from infinilm.utils.tokenizer import fix_llama_tokenizer_decoder
 
 import infinicore
 
@@ -168,23 +168,9 @@ class LLMEngine:
 
     def _fix_tokenizer_decoder(self):
         """Fix tokenizer decoder for llama models."""
-        if "llama" in self.model_engine.model_type.lower():
-            backend = getattr(self.tokenizer, "backend_tokenizer", None)
-            target = getattr(backend, "_tokenizer", backend)
-            norm = getattr(target, "normalizer", None)
-            dec = getattr(target, "decoder", None)
-            sn = repr(norm)[:800] if norm is not None else ""
-            sd = repr(dec)[:800] if dec is not None else ""
-            has_prepend = "Prepend" in sn
-            has_strip = "Strip" in sd
-            if has_prepend and has_strip:
-                target.decoder = _dec.Sequence(
-                    [
-                        _dec.Replace("▁", " "),
-                        _dec.ByteFallback(),
-                        _dec.Fuse(),
-                    ]
-                )
+        fix_llama_tokenizer_decoder(
+            self.tokenizer, self.model_engine.model_type
+        )
 
     def add_request(self, request: InferenceRequest):
         """Add a request to the scheduler."""
