@@ -9,12 +9,11 @@
 #include <thread>
 #include <vector>
 
-void createDeviceResource(DeepSeekV3DeviceResource *rsrc, const DeepSeekV3Meta *meta,
-                          std::shared_ptr<DeepSeekV3DeviceWeights> weights,
-                          infiniDevice_t device, int idev,
-                          int ndev, int dev_id,
-                          infinicclComm_t comm) {
-    RUN_INFINI(infinirtSetDevice(device, dev_id));
+void DeepSeekV3Model::createDeviceResource(DeepSeekV3DeviceResource *rsrc,
+                                            int idev, int ndev,
+                                            int dev_id, infinicclComm_t comm) {
+    auto weights = weights_->device_weights[idev];
+    RUN_INFINI(infinirtSetDevice(device_, dev_id));
     RUN_INFINI(infinirtStreamSynchronize(weights->load_stream));
     infiniopHandle_t handle;
     infiniopCreateHandle(&handle);
@@ -23,103 +22,97 @@ void createDeviceResource(DeepSeekV3DeviceResource *rsrc, const DeepSeekV3Meta *
 
     auto memory_pool = std::make_shared<MemoryPool>();
 
-    *rsrc = DeepSeekV3DeviceResource{
-        device,
-        dev_id,
-        handle,
-        weights,
-        stream,
-        comm,
-        memory_pool,
-    };
+    rsrc->device      = device_;
+    rsrc->device_id   = dev_id;
+    rsrc->handle      = handle;
+    rsrc->weights     = weights_->device_weights[idev];
+    rsrc->stream      = stream;
+    rsrc->comm        = comm;
+    rsrc->memory_pool = memory_pool;
     RUN_INFINI(infinirtDeviceSynchronize());
 }
 
-void releaseDeviceResource(DeepSeekV3DeviceResource &res) {
+void DeepSeekV3Model::releaseDeviceResource(DeepSeekV3DeviceResource &rsrc) {
     infinirtDeviceSynchronize();
 
-    res.weights.reset();
+    rsrc.weights.reset();
 
-    infiniopDestroyHandle(res.handle);
-    res.handle = nullptr;
-    infinirtStreamDestroy(res.stream);
-    res.stream = nullptr;
-    infinicclCommDestroy(res.comm);
-    res.comm = nullptr;
+    infiniopDestroyHandle(rsrc.handle);
+    rsrc.handle = nullptr;
+    infinirtStreamDestroy(rsrc.stream);
+    rsrc.stream = nullptr;
+    infinicclCommDestroy(rsrc.comm);
+    rsrc.comm = nullptr;
 }
 
-void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc,
-                      uint32_t idev, uint32_t ndev,
-                      const uint32_t *tokens, uint32_t ntok,
-                      const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
-                      struct DeepSeekV3Cache **caches,
-                      const float *temperature, const uint32_t *topk, const float *topp,
-                      uint32_t *output, void *last_logits) {
+void DeepSeekV3Model::inferDeviceBatch(DeepSeekV3DeviceResource &rsrc,
+                                        int idev, int ndev,
+                                        const DSInferRequest &req) {
 
-    auto dt_logits = meta.dt_logits;
-    // auto dt_norm = meta.dt_norm;
-    // auto dt_quant_weight = meta.dt_quant_weight;
-    // auto dt_quant_scale = meta.dt_quant_scale;
-    // auto dt_quant_zero = meta.dt_quant_zero;
-    // auto dt_gate_weight = meta.dt_gate_weight;
-    // auto dt_gate_bias = meta.dt_gate_bias;
-    auto n_dense_layer = meta.n_dense_layer;
-    auto n_sparse_layer = meta.n_sparse_layer;
+    auto dt_logits = meta_.dt_logits;
+    // auto dt_norm = meta_.dt_norm;
+    // auto dt_quant_weight = meta_.dt_quant_weight;
+    // auto dt_quant_scale = meta_.dt_quant_scale;
+    // auto dt_quant_zero = meta_.dt_quant_zero;
+    // auto dt_gate_weight = meta_.dt_gate_weight;
+    // auto dt_gate_bias = meta_.dt_gate_bias;
+    auto n_dense_layer = meta_.n_dense_layer;
+    auto n_sparse_layer = meta_.n_sparse_layer;
     auto nlayer = n_dense_layer + n_sparse_layer;
-    size_t nh = meta.nh / size_t(ndev);
+    size_t nh = meta_.nh / size_t(ndev);
 
-    auto d = meta.d;
-    auto d_rope = meta.d_rope;
-    auto d_nope = meta.d_nope;
-    auto r_q = meta.r_q;
-    auto r_kv = meta.r_kv;
-    auto d_qk = meta.d_qk;
-    auto d_v = meta.d_v;
-    // auto routed_scale = meta.routed_scale;
-    // auto nexperts = meta.nexperts;
-    // auto kexperts = meta.kexperts;
+    auto d = meta_.d;
+    auto d_rope = meta_.d_rope;
+    auto d_nope = meta_.d_nope;
+    auto r_q = meta_.r_q;
+    auto r_kv = meta_.r_kv;
+    auto d_qk = meta_.d_qk;
+    auto d_v = meta_.d_v;
+    // auto routed_scale = meta_.routed_scale;
+    // auto nexperts = meta_.nexperts;
+    // auto kexperts = meta_.kexperts;
 
-    auto di = meta.di / size_t(ndev);
-    auto dvoc = meta.dvoc;
+    auto di = meta_.di / size_t(ndev);
+    auto dvoc = meta_.dvoc;
 
     auto stream = rsrc.stream;
 
     auto weights = rsrc.weights;
 
     // Allocate buffers
-    auto logits_in = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);
-    auto logits_out = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);
+    auto logits_in = Tensor::buffer(dt_logits, {req.ntok, d}, rsrc.memory_pool);
+    auto logits_out = Tensor::buffer(dt_logits, {req.ntok, d}, rsrc.memory_pool);
 
-    auto q_a_buf = Tensor::buffer(dt_logits, {ntok, r_q}, rsrc.memory_pool);
-    auto q_buf = Tensor::buffer(dt_logits, {ntok, nh * d_qk}, rsrc.memory_pool);
-    auto kv_a_buf = Tensor::buffer(dt_logits, {ntok, r_kv + d_rope}, rsrc.memory_pool);
-    auto o_buf = Tensor::buffer(dt_logits, {ntok, nh * d_v}, rsrc.memory_pool);
+    auto q_a_buf = Tensor::buffer(dt_logits, {req.ntok, r_q}, rsrc.memory_pool);
+    auto q_buf = Tensor::buffer(dt_logits, {req.ntok, nh * d_qk}, rsrc.memory_pool);
+    auto kv_a_buf = Tensor::buffer(dt_logits, {req.ntok, r_kv + d_rope}, rsrc.memory_pool);
+    auto o_buf = Tensor::buffer(dt_logits, {req.ntok, nh * d_v}, rsrc.memory_pool);
 
-    auto prob_buf = Tensor::buffer(dt_logits, {nreq, dvoc}, rsrc.memory_pool);
-    auto result_buf = Tensor::buffer(INFINI_DTYPE_I64, {nreq}, rsrc.memory_pool);
-    auto result_cpu = std::vector<int64_t>(nreq);
+    auto prob_buf = Tensor::buffer(dt_logits, {req.nreq, dvoc}, rsrc.memory_pool);
+    auto result_buf = Tensor::buffer(INFINI_DTYPE_I64, {req.nreq}, rsrc.memory_pool);
+    auto result_cpu = std::vector<int64_t>(req.nreq);
 
     // Prepare inputs
-    auto batch_pos_ids = std::vector<uint32_t>(ntok);
+    auto batch_pos_ids = std::vector<uint32_t>(req.ntok);
     size_t req_start = 0;
-    for (uint32_t req = 0; req < nreq; req++) {
-        for (uint32_t i = 0; i < req_lens[req]; i++) {
-            batch_pos_ids[req_start + i] = req_pos[req] + i;
+    for (uint32_t ireq = 0; ireq < req.nreq; ireq++) {
+        for (uint32_t i = 0; i < req.req_lens[ireq]; i++) {
+            batch_pos_ids[req_start + i] = req.req_pos[ireq] + i;
         }
-        req_start += req_lens[req];
+        req_start += req.req_lens[ireq];
     }
 
     std::shared_ptr<Tensor> pos_ids_buf;
     if (rsrc.device == INFINI_DEVICE_CPU) {
-        pos_ids_buf = Tensor::weight(batch_pos_ids.data(), INFINI_DTYPE_U32, {ntok});
+        pos_ids_buf = Tensor::weight(batch_pos_ids.data(), INFINI_DTYPE_U32, {req.ntok});
     } else {
-        pos_ids_buf = Tensor::buffer(INFINI_DTYPE_U32, {ntok}, rsrc.memory_pool);
-        RUN_INFINI(infinirtMemcpyAsync(pos_ids_buf->data(), batch_pos_ids.data(), sizeof(uint32_t) * ntok,
+        pos_ids_buf = Tensor::buffer(INFINI_DTYPE_U32, {req.ntok}, rsrc.memory_pool);
+        RUN_INFINI(infinirtMemcpyAsync(pos_ids_buf->data(), batch_pos_ids.data(), sizeof(uint32_t) * req.ntok,
                                        INFINIRT_MEMCPY_H2D, stream));
     }
-    for (uint32_t i = 0; i < ntok; i++) {
+    for (uint32_t i = 0; i < req.ntok; i++) {
         RUN_INFINI(infinirtMemcpyAsync(logits_in->data(i * d),
-                                       weights->w_in_embd->data(tokens[i] * d),
+                                       weights->w_in_embd->data(req.tokens[i] * d),
                                        dsize(dt_logits) * d, INFINIRT_MEMCPY_D2D, stream));
     }
 
@@ -129,9 +122,9 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
     size_t max_seq_len = 0;
     size_t max_total_len = 0;
 
-    for (uint32_t req = 0; req < nreq; req++) {
-        auto past_len = req_pos[req];
-        auto seq_len = req_lens[req];
+    for (uint32_t ireq = 0; ireq < req.nreq; ireq++) {
+        auto past_len = req.req_pos[ireq];
+        auto seq_len = req.req_lens[ireq];
         auto total_len = past_len + seq_len;
 
         max_qk_size = std::max(max_qk_size, size_t(seq_len * total_len));
@@ -147,20 +140,20 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
     for (uint32_t layer = 0; layer < nlayer; layer++) {
         // 1. Attention
         // rms norm
-        rmsnorm(logits_out, logits_in, weights->w_layers[layer].mla_norm, meta.epsilon);
+        rmsnorm(logits_out, logits_in, weights->w_layers[layer].mla_norm, meta_.epsilon);
         // q_proj
         dequant_linear(q_a_buf, logits_out,
                        weights->w_layers[layer].mla->q_a_proj->w,
                        weights->w_layers[layer].mla->q_a_proj->s,
                        weights->w_layers[layer].mla->q_a_proj->z,
                        1.0, 0.0, nullptr, nullptr);
-        rmsnorm(q_a_buf, q_a_buf, weights->w_layers[layer].mla->q_a_norm, meta.epsilon);
+        rmsnorm(q_a_buf, q_a_buf, weights->w_layers[layer].mla->q_a_norm, meta_.epsilon);
         dequant_linear(q_buf, q_a_buf,
                        weights->w_layers[layer].mla->q_b_proj->w,
                        weights->w_layers[layer].mla->q_b_proj->s,
                        weights->w_layers[layer].mla->q_b_proj->z,
                        1.0, 0.0, nullptr, nullptr);
-        auto q_rot = q_buf->view({ntok, nh, d_qk})->slice(2, d_nope, d_rope);
+        auto q_rot = q_buf->view({req.ntok, nh, d_qk})->slice(2, d_nope, d_rope);
         rope_v2(q_rot, q_rot, pos_ids_buf, weights->sin_table, weights->cos_table);
         // kv_proj
         dequant_linear(kv_a_buf, logits_out,
@@ -169,14 +162,14 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
                        weights->w_layers[layer].mla->kv_a_proj->z,
                        1.0, 0.0, nullptr, nullptr);
         auto kv_pass = kv_a_buf->slice(1, 0, r_kv);
-        rmsnorm(kv_pass, kv_pass, weights->w_layers[layer].mla->kv_a_norm, meta.epsilon);
-        auto k_rot = kv_a_buf->slice(1, r_kv, d_rope)->view({ntok, 1, d_rope});
+        rmsnorm(kv_pass, kv_pass, weights->w_layers[layer].mla->kv_a_norm, meta_.epsilon);
+        auto k_rot = kv_a_buf->slice(1, r_kv, d_rope)->view({req.ntok, 1, d_rope});
         rope_v2(k_rot, k_rot, pos_ids_buf, weights->sin_table, weights->cos_table);
 
         size_t token_offset = 0;
-        for (uint32_t req = 0; req < nreq; req++) {
-            auto past_len = req_pos[req];
-            auto seq_len = req_lens[req];
+        for (uint32_t ireq = 0; ireq < req.nreq; ireq++) {
+            auto past_len = req.req_pos[ireq];
+            auto seq_len = req.req_lens[ireq];
             auto total_len = past_len + seq_len;
             auto o_req = o_buf->slice({{0, token_offset, seq_len}})->view({seq_len, nh, d_v});
             auto q_req = q_buf->slice({{0, token_offset, seq_len}});
@@ -185,11 +178,11 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
             auto k_rot_req = kv_a_req->slice(1, r_kv, d_rope);
 
             // concat cache
-            rearrange(caches[req]->kv_pass[idev][layer]->slice(0, past_len, seq_len), kv_pass_req);
-            rearrange(caches[req]->k_rot[idev][layer]->slice(0, past_len, seq_len), k_rot_req);
+            rearrange(req.kv_caches[ireq]->kv_pass[idev][layer]->slice(0, past_len, seq_len), kv_pass_req);
+            rearrange(req.kv_caches[ireq]->k_rot[idev][layer]->slice(0, past_len, seq_len), k_rot_req);
             // kv_b_proj
             auto kv_b_req = kv_b_buf->slice(0, 0, total_len);
-            dequant_linear(kv_b_req, caches[req]->kv_pass[idev][layer]->slice(0, 0, total_len),
+            dequant_linear(kv_b_req, req.kv_caches[ireq]->kv_pass[idev][layer]->slice(0, 0, total_len),
                            weights->w_layers[layer].mla->kv_b_proj->w,
                            weights->w_layers[layer].mla->kv_b_proj->s,
                            weights->w_layers[layer].mla->kv_b_proj->z,
@@ -229,16 +222,16 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
         // All_reduce if distributed
         if (rsrc.comm != nullptr) {
             RUN_INFINI(infinicclAllReduce(
-                logits_in->data(), logits_in->data(), ntok * d, dt_logits,
+                logits_in->data(), logits_in->data(), req.ntok * d, dt_logits,
                 INFINICCL_SUM, rsrc.comm, stream));
             RUN_INFINI(infinirtStreamSynchronize(stream));
         }
         // 2. MLP
-        rmsnorm(logits_out, logits_in, weights->w_layers[layer].mlp_norm, meta.epsilon);
+        rmsnorm(logits_out, logits_in, weights->w_layers[layer].mlp_norm, meta_.epsilon);
 
         if (layer < n_dense_layer) {
-            auto gate_dense = Tensor::buffer(dt_logits, {ntok, di}, rsrc.memory_pool);
-            auto up_dense = Tensor::buffer(dt_logits, {ntok, di}, rsrc.memory_pool);
+            auto gate_dense = Tensor::buffer(dt_logits, {req.ntok, di}, rsrc.memory_pool);
+            auto up_dense = Tensor::buffer(dt_logits, {req.ntok, di}, rsrc.memory_pool);
             dequant_linear(gate_dense, logits_out,
                            weights->w_layers[layer].dense_mlp->gate->w,
                            weights->w_layers[layer].dense_mlp->gate->s,
@@ -259,24 +252,24 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
             //                     后面几层，用的 稀疏MLP                                  //
             // ------------------------------------------------------------------------ //
             // 需要提前申请的缓存，给每个MLP使用
-            auto moe_gate_buf = Tensor::buffer(dt_logits, {ntok, meta.di_moe}, rsrc.memory_pool);
-            auto moe_up_buf = Tensor::buffer(dt_logits, {ntok, meta.di_moe}, rsrc.memory_pool);
+            auto moe_gate_buf = Tensor::buffer(dt_logits, {req.ntok, meta_.di_moe}, rsrc.memory_pool);
+            auto moe_up_buf = Tensor::buffer(dt_logits, {req.ntok, meta_.di_moe}, rsrc.memory_pool);
 
             // 需要提前申请的缓存
-            std::shared_ptr<Tensor> shared_states = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool);     // 用于存储共享专家的输出
-            std::shared_ptr<Tensor> router_states_sum = Tensor::buffer(dt_logits, {ntok, d}, rsrc.memory_pool); // 用于存储路由专家的加权输出
+            std::shared_ptr<Tensor> shared_states = Tensor::buffer(dt_logits, {req.ntok, d}, rsrc.memory_pool);     // 用于存储共享专家的输出
+            std::shared_ptr<Tensor> router_states_sum = Tensor::buffer(dt_logits, {req.ntok, d}, rsrc.memory_pool); // 用于存储路由专家的加权输出
 
             // 需要提前申请的缓存
-            std::shared_ptr<Tensor> router_logits = Tensor::buffer(dt_logits, {ntok, meta.nexperts}, rsrc.memory_pool); // nx256，路由专家的权重
+            std::shared_ptr<Tensor> router_logits = Tensor::buffer(dt_logits, {req.ntok, meta_.nexperts}, rsrc.memory_pool); // nx256，路由专家的权重
 
-            std::shared_ptr<Tensor> values_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_F32, {ntok * 8}, rsrc.memory_pool);  // 用于存储topkrouter的输出，每个expert对应的加权权重。
-            std::shared_ptr<Tensor> indices_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_I32, {ntok * 8}, rsrc.memory_pool); // 用于存储topkrouter的输出，要经过哪些专家id（从256个中选8个）
-            std::vector<float> values_cpu(ntok * 8, 0.f);                                                                        // 用于存储topkrouter的输出，每个expert对应的加权权重。（从256个中选8个）
-            std::vector<int> indices_cpu(ntok * 8, 0);                                                                           // 用于存储topkrouter的输出，要经过哪些专家的索引。
+            std::shared_ptr<Tensor> values_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_F32, {req.ntok * 8}, rsrc.memory_pool);  // 用于存储topkrouter的输出，每个expert对应的加权权重。
+            std::shared_ptr<Tensor> indices_gpu = Tensor::buffer(infiniDtype_t::INFINI_DTYPE_I32, {req.ntok * 8}, rsrc.memory_pool); // 用于存储topkrouter的输出，要经过哪些专家id（从256个中选8个）
+            std::vector<float> values_cpu(req.ntok * 8, 0.f);                                                                        // 用于存储topkrouter的输出，每个expert对应的加权权重。（从256个中选8个）
+            std::vector<int> indices_cpu(req.ntok * 8, 0);                                                                           // 用于存储topkrouter的输出，要经过哪些专家的索引。
 
             // config 参数
-            float routed_scaling_factor = meta.routed_scale; // config.json的超参"routed_scaling_factor"，是固定值 2.5
-            size_t topk = 8;                                 // config.json的超参"num_experts_per_tok",  是固定值 8
+            float routed_scaling_factor = meta_.routed_scale; // config.json的超参"routed_scaling_factor"，是固定值 2.5
+            size_t moe_topk = 8;                               // config.json的超参"num_experts_per_tok",  是固定值 8
 
             // 明确输入输出变量
             std::shared_ptr<Tensor> hidden_states = logits_out; // logits_out 是整个 MoE的输入，重新起名字为 hidden_states
@@ -311,7 +304,7 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
                 gemm(router_logits, hidden_states, gate_weight, 1.0, 0.0); // 非量化的版本
 
                 auto gate_correction_bias = weights->w_layers[layer].route->b;
-                topkrouter(values_gpu, indices_gpu, router_logits, gate_correction_bias, routed_scaling_factor, topk);
+                topkrouter(values_gpu, indices_gpu, router_logits, gate_correction_bias, routed_scaling_factor, moe_topk);
                 RUN_INFINI(infinirtMemcpy((void *)values_cpu.data(), values_gpu->data(), values_cpu.size() * sizeof(float), INFINIRT_MEMCPY_D2H));
                 RUN_INFINI(infinirtMemcpy((void *)indices_cpu.data(), indices_gpu->data(), indices_cpu.size() * sizeof(int), INFINIRT_MEMCPY_D2H));
             }
@@ -319,7 +312,7 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
             // (3) MoE操作：  hidden_states经过一个8个路由专家
             // 输入: hidden_states, values_cpu，indices_cpu
             // 输出: router_states_sum
-            for (size_t itok = 0; itok < ntok; ++itok) { // 先遍历每一个token，再遍历该toekn经过对应的专家
+            for (size_t itok = 0; itok < req.ntok; ++itok) { // 先遍历每一个token，再遍历该toekn经过对应的专家
 
                 std::shared_ptr<Tensor> hidden_states_i = hidden_states->slice(0, itok, 1);
                 std::shared_ptr<Tensor> router_states_sum_i = router_states_sum->slice(0, itok, 1);
@@ -330,8 +323,8 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
                 {
                     // 输入: hidden_states
                     // 输出: router_states_sum_i
-                    int index = indices_cpu[itok * topk];
-                    float alpha = values_cpu[itok * topk];
+                    int index = indices_cpu[itok * moe_topk];
+                    float alpha = values_cpu[itok * moe_topk];
 
                     dequant_linear(moe_gate_buf_i, hidden_states_i,
                                    weights->w_layers[layer].experts[index]->gate->w,
@@ -351,9 +344,9 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
                 }
 
                 // 经过后续的专家 : C  = alpha * AB + C_last
-                for (size_t k = 1; k < topk; ++k) {
-                    int index = indices_cpu[itok * topk + k];
-                    float alpha = values_cpu[itok * topk + k];
+                for (size_t k = 1; k < moe_topk; ++k) {
+                    int index = indices_cpu[itok * moe_topk + k];
+                    float alpha = values_cpu[itok * moe_topk + k];
 
                     dequant_linear(moe_gate_buf_i, hidden_states_i,
                                    weights->w_layers[layer].experts[index]->gate->w,
@@ -385,47 +378,47 @@ void inferDeviceBatch(const DeepSeekV3Meta &meta, DeepSeekV3DeviceResource &rsrc
         // All_reduce if distributed
         if (rsrc.comm != nullptr) {
             RUN_INFINI(infinicclAllReduce(
-                logits_in->data(), logits_in->data(), ntok * d, dt_logits,
+                logits_in->data(), logits_in->data(), req.ntok * d, dt_logits,
                 INFINICCL_SUM, rsrc.comm, stream));
             RUN_INFINI(infinirtStreamSynchronize(stream));
         }
     }
     // Sample and Output
     if (idev == 0) {
-        if (last_logits != nullptr) {
-            rmsnorm(logits_out, logits_in, weights->w_out_norm, meta.epsilon);
-            auto last_logits_buf = Tensor::buffer(dt_logits, {ntok, dvoc}, rsrc.memory_pool);
+        if (req.logits != nullptr) {
+            rmsnorm(logits_out, logits_in, weights->w_out_norm, meta_.epsilon);
+            auto last_logits_buf = Tensor::buffer(dt_logits, {req.ntok, dvoc}, rsrc.memory_pool);
             linear(last_logits_buf, logits_out, weights->w_out_embd, 1.0, 0.0, nullptr, nullptr);
             RUN_INFINI(infinirtStreamSynchronize(stream));
-            RUN_INFINI(infinirtMemcpy(last_logits, last_logits_buf->data(), dsize(dt_logits) * ntok * dvoc, INFINIRT_MEMCPY_D2H));
+            RUN_INFINI(infinirtMemcpy(req.logits, last_logits_buf->data(), dsize(dt_logits) * req.ntok * dvoc, INFINIRT_MEMCPY_D2H));
         }
-        if (output != nullptr) {
+        if (req.output != nullptr) {
             size_t token_offset = 0;
-            for (uint32_t req = 0; req < nreq; req++) {
-                auto seq_len = req_lens[req];
+            for (uint32_t ireq = 0; ireq < req.nreq; ireq++) {
+                auto seq_len = req.req_lens[ireq];
                 token_offset += seq_len;
-                rmsnorm(logits_out->slice(0, req, 1),
+                rmsnorm(logits_out->slice(0, ireq, 1),
                         logits_in->slice(0, token_offset - 1, 1),
                         weights->w_out_norm,
-                        meta.epsilon);
+                        meta_.epsilon);
             }
-            linear(prob_buf, logits_out->slice(0, 0, nreq), weights->w_out_embd, 1.0, 0.0, nullptr, nullptr);
+            linear(prob_buf, logits_out->slice(0, 0, req.nreq), weights->w_out_embd, 1.0, 0.0, nullptr, nullptr);
             std::random_device _rd;
             std::mt19937 gen(_rd());
             token_offset = 0;
-            for (uint32_t req = 0; req < nreq; req++) {
-                auto seq_len = req_lens[req];
+            for (uint32_t ireq = 0; ireq < req.nreq; ireq++) {
+                auto seq_len = req.req_lens[ireq];
                 float random_val = std::uniform_real_distribution<float>(0, 1)(gen);
-                randomSample(result_buf->slice(0, req, 1)->view_as({}, {}),
-                             prob_buf->slice(0, req, 1)->view_as({dvoc}, {1}),
-                             random_val, topp[req], topk[req], temperature[req]);
+                randomSample(result_buf->slice(0, ireq, 1)->view_as({}, {}),
+                             prob_buf->slice(0, ireq, 1)->view_as({dvoc}, {1}),
+                             random_val, req.topp[ireq], req.topk[ireq], req.temperature[ireq]);
                 token_offset += seq_len;
             }
             RUN_INFINI(infinirtStreamSynchronize(stream));
             RUN_INFINI(infinirtMemcpy(result_cpu.data(), result_buf->data(),
-                                      sizeof(int64_t) * nreq, INFINIRT_MEMCPY_D2H));
-            for (uint32_t req = 0; req < nreq; req++) {
-                output[req] = uint32_t(result_cpu[req]);
+                                      sizeof(int64_t) * req.nreq, INFINIRT_MEMCPY_D2H));
+            for (uint32_t ireq = 0; ireq < req.nreq; ireq++) {
+                req.output[ireq] = uint32_t(result_cpu[ireq]);
             }
         }
     }
@@ -438,30 +431,19 @@ inferBatchDeepSeekV3(struct DeepSeekV3Model *model,
                      struct DeepSeekV3Cache **kv_caches,
                      const float *temperature, const uint32_t *topk, const float *topp,
                      uint32_t *output) {
-    model->req.tokens = tokens;
-    model->req.ntok = ntok;
-    model->req.req_lens = req_lens;
-    model->req.nreq = nreq;
-    model->req.req_pos = req_pos;
-    model->req.kv_caches = kv_caches;
-    model->req.output = output;
-    model->req.logits = nullptr;
-    model->req.temperature = temperature;
-    model->req.topk = topk;
-    model->req.topp = topp;
-
-    for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].proceed = true;
-        lock.unlock();
-        model->states[idev].cv_start.notify_one();
-    }
-    for (size_t i = model->dev_ids.size(); i > 0; i--) {
-        auto idev = i - 1;
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].cv_done.wait(lock, [&] { return !(model->states[idev].proceed); });
-        lock.unlock();
-    }
+    DSInferRequest req{};
+    req.tokens      = tokens;
+    req.ntok        = ntok;
+    req.req_lens    = req_lens;
+    req.nreq        = nreq;
+    req.req_pos     = req_pos;
+    req.kv_caches   = kv_caches;
+    req.temperature = temperature;
+    req.topk        = topk;
+    req.topp        = topp;
+    req.output      = output;
+    req.logits      = nullptr;
+    model->dispatch(req);
 }
 
 __INFINI_C void
@@ -470,120 +452,41 @@ forwardBatchDeepSeekV3(struct DeepSeekV3Model *model,
                        const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
                        struct DeepSeekV3Cache **kv_caches,
                        void *logits) {
-    model->req.tokens = tokens;
-    model->req.ntok = ntok;
-    model->req.req_lens = req_lens;
-    model->req.nreq = nreq;
-    model->req.req_pos = req_pos;
-    model->req.kv_caches = kv_caches;
-    model->req.output = nullptr;
-    model->req.logits = logits;
-    model->req.temperature = nullptr;
-    model->req.topk = nullptr;
-    model->req.topp = nullptr;
-
-    for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].proceed = true;
-        lock.unlock();
-        model->states[idev].cv_start.notify_one();
-    }
-    for (size_t i = model->dev_ids.size(); i > 0; i--) {
-        auto idev = i - 1;
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].cv_done.wait(lock, [&] { return !(model->states[idev].proceed); });
-        lock.unlock();
-    }
+    DSInferRequest req{};
+    req.tokens      = tokens;
+    req.ntok        = ntok;
+    req.req_lens    = req_lens;
+    req.nreq        = nreq;
+    req.req_pos     = req_pos;
+    req.kv_caches   = kv_caches;
+    req.temperature = nullptr;
+    req.topk        = nullptr;
+    req.topp        = nullptr;
+    req.output      = nullptr;
+    req.logits      = logits;
+    model->dispatch(req);
 }
 
-void launchDevice(const DeepSeekV3Meta &meta, std::shared_ptr<DeepSeekV3DeviceWeights> weights, DeepSeekV3DeviceResource *rsrc, InferState &state, InferRequest &req,
-                  infiniDevice_t device, int idev, int ndev, int dev_id, infinicclComm_t comm) {
-    // Create Device Resource
-    createDeviceResource(rsrc, &meta, weights, device, idev, ndev, dev_id, comm);
-
-    CacheManager cache_manager(100);
-    InferenceContext ctx(rsrc->handle, rsrc->memory_pool, &cache_manager, rsrc->stream);
-
-    // Set the inference context for this thread
-    setInferenceContext(&ctx);
-
-    {
-        std::unique_lock<std::mutex> lock(state.mtx);
-        state.loaded = true;
-        lock.unlock();
-        state.cv_load.notify_one();
-    }
-
-    // Infer Loop
-    while (true) {
-        std::unique_lock<std::mutex> lock(state.mtx);
-        state.cv_start.wait(lock, [&] { return state.proceed || state.exit_flag; });
-        // quit if exit_flag is set
-        if (state.exit_flag) {
-            break;
-        }
-
-        inferDeviceBatch(meta, *rsrc, idev, ndev, req.tokens, req.ntok,
-                         req.req_lens, req.nreq, req.req_pos, req.kv_caches,
-                         req.temperature, req.topk, req.topp, req.output, req.logits);
-
-        state.proceed = false;
-        lock.unlock();
-        state.cv_done.notify_one();
-    }
-
-    // Clean-Up
-    releaseDeviceResource(*rsrc);
-    setInferenceContext(nullptr); // Clear the context when done
-}
-
-DeepSeekV3Model::DeepSeekV3Model(const DeepSeekV3Meta *_meta, const DeepSeekV3Weights *weights) : meta(*_meta) {
-    auto device_weights = weights->device_weights;
-    int ndev = device_weights.size();
-    device = device_weights[0]->device;
-    dev_ids.resize(ndev);
-    for (int i = 0; i < ndev; i++) {
-        dev_ids[i] = device_weights[i]->dev_id;
-    }
-    dev_resources = std::vector<DeepSeekV3DeviceResource>(ndev);
-    states = std::vector<InferState>(ndev);
-    threads.resize(ndev);
-    RUN_INFINI(infinirtInit());
-    auto comms = std::vector<infinicclComm_t>(ndev, nullptr);
-    if (ndev > 1) {
-        RUN_INFINI(infinicclCommInitAll(device, comms.data(), ndev, dev_ids.data()));
-    }
-    for (int i = 0; i < ndev; i++) {
-        threads[i] = std::thread(launchDevice, std::cref(meta), device_weights[i], &dev_resources[i], std::ref(states[i]), std::ref(req), device, i, ndev, dev_ids[i], comms[i]);
-    }
-    for (int i = 0; i < ndev; i++) {
-        std::unique_lock<std::mutex> lock(states[i].mtx);
-        states[i].cv_load.wait(lock, [&] { return states[i].loaded; });
-        lock.unlock();
-    }
+DeepSeekV3Model::DeepSeekV3Model(const DeepSeekV3Meta *meta, const DeepSeekV3Weights *weights)
+    : ModelBase(*meta,
+                weights->device_weights[0]->device,
+                [&]() {
+                    std::vector<int> ids;
+                    for (auto &dw : weights->device_weights) ids.push_back(dw->dev_id);
+                    return ids;
+                }()),
+      weights_(weights)
+{
+    launch();
 }
 
 __INFINI_C struct DeepSeekV3Model *
 createDeepSeekV3Model(const DeepSeekV3Meta *_meta,
                       const DeepSeekV3Weights *weights) {
-    DeepSeekV3Model *model = new DeepSeekV3Model(_meta, weights);
-    return model;
+    return new DeepSeekV3Model(_meta, weights);
 }
 
 __INFINI_C void
 destroyDeepSeekV3Model(struct DeepSeekV3Model *model) {
-    auto ndev = model->dev_resources.size();
-
-    for (size_t idev = 0; idev < ndev; idev++) {
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].exit_flag = true;
-        lock.unlock();
-        model->states[idev].cv_start.notify_one();
-    }
-
-    for (size_t idev = 0; idev < ndev; idev++) {
-        model->threads[idev].join();
-    }
-
     delete model;
 }
