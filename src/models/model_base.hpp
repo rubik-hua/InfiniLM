@@ -103,6 +103,24 @@ public:
     ModelBase(const ModelBase &)            = delete;
     ModelBase &operator=(const ModelBase &) = delete;
 
+    // Copy req into req_, signal all device threads, and wait until all finish.
+    void dispatch(const Request &req) {
+        int ndev = static_cast<int>(dev_ids_.size());
+        for (int idev = 0; idev < ndev; idev++) {
+            std::unique_lock<std::mutex> lock(states_[idev].mtx);
+            if (idev == 0) req_ = req;  // synchronised via states_[0].mtx
+            states_[idev].proceed = true;
+            lock.unlock();
+            states_[idev].cv_start.notify_one();
+        }
+        // Wait in reverse order (matches original inferBatchJiuge pattern)
+        for (int i = ndev; i > 0; i--) {
+            int idev = i - 1;
+            std::unique_lock<std::mutex> lock(states_[idev].mtx);
+            states_[idev].cv_done.wait(lock, [&] { return !states_[idev].proceed; });
+        }
+    }
+
 protected:
     // ── Subclass interface (pure virtual) ────────────────────────────────────
 
@@ -141,24 +159,6 @@ protected:
         for (int i = 0; i < ndev; i++) {
             std::unique_lock<std::mutex> lock(states_[i].mtx);
             states_[i].cv_load.wait(lock, [&] { return states_[i].loaded; });
-        }
-    }
-
-    // Copy req into req_, signal all device threads, and wait until all finish.
-    void dispatch(const Request &req) {
-        int ndev = static_cast<int>(dev_ids_.size());
-        for (int idev = 0; idev < ndev; idev++) {
-            std::unique_lock<std::mutex> lock(states_[idev].mtx);
-            if (idev == 0) req_ = req;  // synchronised via states_[0].mtx
-            states_[idev].proceed = true;
-            lock.unlock();
-            states_[idev].cv_start.notify_one();
-        }
-        // Wait in reverse order (matches original inferBatchJiuge pattern)
-        for (int i = ndev; i > 0; i--) {
-            int idev = i - 1;
-            std::unique_lock<std::mutex> lock(states_[idev].mtx);
-            states_[idev].cv_done.wait(lock, [&] { return !states_[idev].proceed; });
         }
     }
 
