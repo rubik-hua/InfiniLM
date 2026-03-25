@@ -9,12 +9,11 @@
 #include <thread>
 #include <vector>
 
-void createDeviceResource(Qwen3vlDeviceResource *rsrc, const Qwen3vlMeta *meta,
-                          std::shared_ptr<Qwen3vlDeviceWeights> weights,
-                          infiniDevice_t device, int idev,
-                          int ndev, int dev_id,
-                          infinicclComm_t comm) {
-    RUN_INFINI(infinirtSetDevice(device, dev_id));
+void Qwen3vlModel::createDeviceResource(Qwen3vlDeviceResource *rsrc,
+                                        int idev, int ndev,
+                                        int dev_id, infinicclComm_t comm) {
+    RUN_INFINI(infinirtSetDevice(device_, dev_id));
+    auto weights = weights_->device_weights[idev];
     RUN_INFINI(infinirtStreamSynchronize(weights->load_stream));
     infiniopHandle_t handle;
     infiniopCreateHandle(&handle);
@@ -23,29 +22,28 @@ void createDeviceResource(Qwen3vlDeviceResource *rsrc, const Qwen3vlMeta *meta,
 
     auto memory_pool = std::make_shared<MemoryPool>();
 
-    *rsrc = Qwen3vlDeviceResource{
-        device,
-        dev_id,
-        handle,
-        weights,
-        stream,
-        comm,
-        memory_pool,
-    };
+    rsrc->device      = device_;
+    rsrc->device_id   = dev_id;
+    rsrc->handle      = handle;
+    rsrc->weights     = weights_->device_weights[idev];
+    rsrc->stream      = stream;
+    rsrc->comm        = comm;
+    rsrc->memory_pool = memory_pool;
+
     RUN_INFINI(infinirtDeviceSynchronize());
 }
 
-void releaseDeviceResource(Qwen3vlDeviceResource &res) {
+void Qwen3vlModel::releaseDeviceResource(Qwen3vlDeviceResource &rsrc) {
     infinirtDeviceSynchronize();
 
-    res.weights.reset();
+    rsrc.weights.reset();
 
-    infiniopDestroyHandle(res.handle);
-    res.handle = nullptr;
-    infinirtStreamDestroy(res.stream);
-    res.stream = nullptr;
-    infinicclCommDestroy(res.comm);
-    res.comm = nullptr;
+    infiniopDestroyHandle(rsrc.handle);
+    rsrc.handle = nullptr;
+    infinirtStreamDestroy(rsrc.stream);
+    rsrc.stream = nullptr;
+    infinicclCommDestroy(rsrc.comm);
+    rsrc.comm = nullptr;
 }
 
 inline std::shared_ptr<Tensor> get_custom_SinTable(const Qwen3vlMeta &meta, std::vector<std::vector<uint32_t>> &pos_ids, uint32_t dim, size_t theta) {
@@ -267,7 +265,7 @@ inline auto rot_pos_embed(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc, 
 }
 
 void inferDeviceBatchVision(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
-                            uint32_t idev, uint32_t ndev, InferRequest &req) {
+                            int idev, int ndev, const Qwen3vlInferRequest &req) {
     void *pixel_values = req.pixel_values;
     uint32_t total_patches = req.total_patches;
     uint32_t *image_grid_thw = req.image_grid_thw;
@@ -304,7 +302,7 @@ void inferDeviceBatchVision(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc
 }
 
 void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
-                          uint32_t idev, uint32_t ndev, InferRequest &req) {
+                          int idev, int ndev, const Qwen3vlInferRequest &req) {
     const uint32_t *tokens = req.tokens;
     uint32_t ntok = req.ntok;
     const uint32_t *req_lens = req.req_lens;
@@ -353,11 +351,11 @@ void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
     // Prepare inputs
     auto batch_pos_ids = std::vector<uint32_t>(ntok);
     size_t req_start = 0;
-    for (uint32_t req = 0; req < nreq; req++) {
-        for (uint32_t i = 0; i < req_lens[req]; i++) {       // req_len 本次query长度，req_pos 历史长度
-            batch_pos_ids[req_start + i] = req_pos[req] + i; // batch_pos_ids 展平后每个token的pos
+    for (uint32_t ireq = 0; ireq < nreq; ireq++) {
+        for (uint32_t i = 0; i < req_lens[ireq]; i++) {       // req_len 本次query长度，req_pos 历史长度
+            batch_pos_ids[req_start + i] = req_pos[ireq] + i; // batch_pos_ids 展平后每个token的pos
         }
-        req_start += req_lens[req];
+        req_start += req_lens[ireq];
     }
     std::shared_ptr<Tensor> pos_ids_buf;
     if (rsrc.device == INFINI_DEVICE_CPU) {
@@ -379,9 +377,9 @@ void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
     size_t max_qk_size = 0;
     size_t max_seq_len = 0;
 
-    for (uint32_t req = 0; req < nreq; req++) {
-        auto past_len = req_pos[req];
-        auto seq_len = req_lens[req];
+    for (uint32_t ireq = 0; ireq < nreq; ireq++) {
+        auto past_len = req_pos[ireq];
+        auto seq_len = req_lens[ireq];
         auto total_len = past_len + seq_len;
 
         max_qk_size = std::max(max_qk_size, size_t(seq_len * total_len));
@@ -412,9 +410,9 @@ void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
 
         // 逐个req处理
         size_t token_offset = 0;
-        for (uint32_t req = 0; req < nreq; req++) {
-            auto past_len = req_pos[req];
-            auto seq_len = req_lens[req];
+        for (uint32_t ireq = 0; ireq < nreq; ireq++) {
+            auto past_len = req_pos[ireq];
+            auto seq_len = req_lens[ireq];
             auto total_len = past_len + seq_len;
 
             auto o = o_buf->slice(0, token_offset, seq_len)->view({seq_len, nkvh, ngroup, dh})->permute({1, 2, 0, 3});                    // [nkvh, ngroup, seq_len, dh]
@@ -423,12 +421,12 @@ void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
             auto v = qkv_rope->slice({{0, token_offset, seq_len}, {1, nh + nkvh, nkvh}});                                                 // [ntok, nkvh, dh]
 
             // concat to cache
-            rearrange(caches[req]->k_rot[idev][i]->slice(0, past_len, seq_len), k);
-            rearrange(caches[req]->v[idev][i]->slice(0, past_len, seq_len), v);
+            rearrange(caches[ireq]->k_rot[idev][i]->slice(0, past_len, seq_len), k);
+            rearrange(caches[ireq]->v[idev][i]->slice(0, past_len, seq_len), v);
 
             // fill full_k full_v
-            auto full_k_buff = caches[req]->k_rot[idev][i]->slice(0, 0, total_len)->permute({1, 2, 0}); // [nkvh, dh, total_len]
-            auto full_v_buff = caches[req]->v[idev][i]->slice(0, 0, total_len)->permute({1, 0, 2});     // [nkvh, total_len, dh]
+            auto full_k_buff = caches[ireq]->k_rot[idev][i]->slice(0, 0, total_len)->permute({1, 2, 0}); // [nkvh, dh, total_len]
+            auto full_v_buff = caches[ireq]->v[idev][i]->slice(0, 0, total_len)->permute({1, 0, 2});     // [nkvh, total_len, dh]
 
             // self-attn
             rearrange(q_rearrange->slice(2, 0, seq_len), q);
@@ -481,10 +479,10 @@ void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
         }
         if (output != nullptr) {
             size_t token_offset = 0;
-            for (uint32_t req = 0; req < nreq; req++) {
-                auto seq_len = req_lens[req];
+            for (uint32_t ireq = 0; ireq < nreq; ireq++) {
+                auto seq_len = req_lens[ireq];
                 token_offset += seq_len;
-                rmsnorm(logits_out->slice(0, req, 1),
+                rmsnorm(logits_out->slice(0, ireq, 1),
                         logits_in->slice(0, token_offset - 1, 1),
                         weights->w_lang->out_norm,
                         epsilon);
@@ -493,40 +491,64 @@ void inferDeviceBatchText(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
             std::random_device _rd;
             std::mt19937 gen(_rd());
             token_offset = 0;
-            for (uint32_t req = 0; req < nreq; req++) {
-                auto seq_len = req_lens[req];
+            for (uint32_t ireq = 0; ireq < nreq; ireq++) {
+                auto seq_len = req_lens[ireq];
                 float random_val = std::uniform_real_distribution<float>(0, 1)(gen);
-                randomSample(result_buf->slice(0, req, 1)->view_as({}, {}),
-                             prob_buf->slice(0, req, 1)->view_as({dvoc}, {1}),
-                             random_val, topp[req], topk[req], temperature[req]);
+                randomSample(result_buf->slice(0, ireq, 1)->view_as({}, {}),
+                             prob_buf->slice(0, ireq, 1)->view_as({dvoc}, {1}),
+                             random_val, topp[ireq], topk[ireq], temperature[ireq]);
                 token_offset += seq_len;
             }
             RUN_INFINI(infinirtStreamSynchronize(stream));
             RUN_INFINI(infinirtMemcpy(result_cpu.data(), result_buf->data(),
                                       sizeof(int64_t) * nreq, INFINIRT_MEMCPY_D2H));
-            for (uint32_t req = 0; req < nreq; req++) {
-                output[req] = uint32_t(result_cpu[req]);
+            for (uint32_t ireq = 0; ireq < nreq; ireq++) {
+                output[ireq] = uint32_t(result_cpu[ireq]);
             }
         }
     }
 }
 
-void inferDeviceBatch(const Qwen3vlMeta &meta, Qwen3vlDeviceResource &rsrc,
-                      uint32_t idev, uint32_t ndev, InferState &state, InferRequest &req) {
+void Qwen3vlModel::inferDeviceBatch(Qwen3vlDeviceResource &rsrc,
+                                     int idev, int ndev,
+                                     const Qwen3vlInferRequest &req) {
     // infer vision + sync
     if (req.num_images > 0 || req.num_videos > 0) {
-        inferDeviceBatchVision(meta, rsrc, idev, ndev, req);
+        inferDeviceBatchVision(meta_, rsrc, idev, ndev, req);
 
-        std::unique_lock<std::mutex> lock(state.mtx_sync);
-        state.sync_cnt--;
-        if (state.sync_cnt == 0) {
-            state.cv_sync.notify_all();
+        std::unique_lock<std::mutex> lock(Qwen3vlInferState::mtx_sync);
+        Qwen3vlInferState::sync_cnt--;
+        if (Qwen3vlInferState::sync_cnt == 0) {
+            Qwen3vlInferState::cv_sync.notify_all();
         } else {
-            state.cv_sync.wait(lock, [&] { return state.sync_cnt == 0; });
+            Qwen3vlInferState::cv_sync.wait(lock, [] { return Qwen3vlInferState::sync_cnt == 0; });
         }
     }
     // infer text
-    inferDeviceBatchText(meta, rsrc, idev, ndev, req);
+    inferDeviceBatchText(meta_, rsrc, idev, ndev, req);
+}
+
+Qwen3vlModel::Qwen3vlModel(const Qwen3vlMeta *meta, const Qwen3vlWeights *weights)
+    : ModelBase(*meta,
+                weights->device_weights[0]->device,
+                [&]() {
+                    std::vector<int> ids;
+                    for (auto &dw : weights->device_weights) ids.push_back(dw->dev_id);
+                    return ids;
+                }()),
+      weights_(weights)
+{
+    launch();
+}
+
+__INFINI_C struct Qwen3vlModel *
+createQwen3vlModel(const Qwen3vlMeta *_meta, const Qwen3vlWeights *weights) {
+    return new Qwen3vlModel(_meta, weights);
+}
+
+__INFINI_C void
+destroyQwen3vlModel(struct Qwen3vlModel *model) {
+    delete model;
 }
 
 __INFINI_C void
@@ -541,40 +563,29 @@ inferBatchQwen3vl(struct Qwen3vlModel *model,
                   struct Qwen3vlCache **kv_caches,
                   const float *temperature, const uint32_t *topk, const float *topp,
                   uint32_t *output) {
-    model->req.tokens = tokens;
-    model->req.ntok = ntok;
-    model->req.pixel_values = pixel_values;
-    model->req.total_patches = total_patches;
-    model->req.image_grid_thw = image_grid_thw;
-    model->req.num_images = num_images;
-    model->req.pixel_values_videos = pixel_values_videos;
-    model->req.total_patches_videos = total_patches_videos;
-    model->req.video_grid_thw = video_grid_thw;
-    model->req.num_videos = num_videos;
-    model->req.patch_features = patch_features;
-    model->req.req_lens = req_lens;
-    model->req.nreq = nreq;
-    model->req.req_pos = req_pos;
-    model->req.kv_caches = kv_caches;
-    model->req.output = output;
-    model->req.logits = nullptr;
-    model->req.temperature = temperature;
-    model->req.topk = topk;
-    model->req.topp = topp;
-    model->states[0].sync_cnt = model->dev_ids.size();
-
-    for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].proceed = true;
-        lock.unlock();
-        model->states[idev].cv_start.notify_one();
-    }
-    for (size_t i = model->dev_ids.size(); i > 0; i--) {
-        auto idev = i - 1;
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].cv_done.wait(lock, [&] { return !(model->states[idev].proceed); });
-        lock.unlock();
-    }
+    Qwen3vlInferRequest req{};
+    req.tokens               = tokens;
+    req.ntok                 = ntok;
+    req.pixel_values         = pixel_values;
+    req.total_patches        = total_patches;
+    req.image_grid_thw       = image_grid_thw;
+    req.num_images           = num_images;
+    req.pixel_values_videos  = pixel_values_videos;
+    req.total_patches_videos = total_patches_videos;
+    req.video_grid_thw       = video_grid_thw;
+    req.num_videos           = num_videos;
+    req.patch_features       = patch_features;
+    req.req_lens             = req_lens;
+    req.nreq                 = nreq;
+    req.req_pos              = req_pos;
+    req.kv_caches            = kv_caches;
+    req.temperature          = temperature;
+    req.topk                 = topk;
+    req.topp                 = topp;
+    req.output               = output;
+    req.logits               = nullptr;
+    Qwen3vlInferState::sync_cnt = model->ndev();
+    model->dispatch(req);
 }
 
 __INFINI_C void
@@ -588,128 +599,27 @@ forwardBatchQwen3vl(struct Qwen3vlModel *model,
                     const uint32_t *req_lens, uint32_t nreq, const uint32_t *req_pos,
                     struct Qwen3vlCache **kv_caches,
                     void *logits) {
-    model->req.tokens = tokens;
-    model->req.ntok = ntok;
-    model->req.pixel_values = pixel_values;
-    model->req.total_patches = total_patches;
-    model->req.image_grid_thw = image_grid_thw;
-    model->req.num_images = num_images;
-    model->req.pixel_values_videos = pixel_values_videos;
-    model->req.total_patches_videos = total_patches_videos;
-    model->req.video_grid_thw = video_grid_thw;
-    model->req.num_videos = num_videos;
-    model->req.patch_features = patch_features;
-    model->req.req_lens = req_lens;
-    model->req.nreq = nreq;
-    model->req.req_pos = req_pos;
-    model->req.kv_caches = kv_caches;
-    model->req.output = nullptr;
-    model->req.logits = logits;
-    model->req.temperature = nullptr;
-    model->req.topk = nullptr;
-    model->req.topp = nullptr;
-    model->states[0].sync_cnt = model->dev_ids.size();
-
-    for (size_t idev = 0; idev < model->dev_ids.size(); idev++) {
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].proceed = true;
-        lock.unlock();
-        model->states[idev].cv_start.notify_one();
-    }
-    for (size_t i = model->dev_ids.size(); i > 0; i--) {
-        auto idev = i - 1;
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].cv_done.wait(lock, [&] { return !(model->states[idev].proceed); });
-        lock.unlock();
-    }
-}
-
-void launchDevice(const Qwen3vlMeta &meta, std::shared_ptr<Qwen3vlDeviceWeights> weights, Qwen3vlDeviceResource *rsrc, InferState &state, InferRequest &req,
-                  infiniDevice_t device, int idev, int ndev, int dev_id, infinicclComm_t comm) {
-    // Create Device Resource
-    createDeviceResource(rsrc, &meta, weights, device, idev, ndev, dev_id, comm);
-
-    CacheManager cache_manager(100);
-    InferenceContext ctx(rsrc->handle, rsrc->memory_pool, &cache_manager, rsrc->stream);
-
-    // Set the inference context for this thread
-    setInferenceContext(&ctx);
-
-    {
-        std::unique_lock<std::mutex> lock(state.mtx);
-        state.loaded = true;
-        lock.unlock();
-        state.cv_load.notify_one();
-    }
-
-    // Infer Loop
-    while (true) {
-        std::unique_lock<std::mutex> lock(state.mtx);
-        state.cv_start.wait(lock, [&] { return state.proceed || state.exit_flag; });
-        // quit if exit_flag is set
-        if (state.exit_flag) {
-            break;
-        }
-
-        inferDeviceBatch(meta, *rsrc, idev, ndev, state, req);
-
-        state.proceed = false;
-        lock.unlock();
-        state.cv_done.notify_one();
-    }
-
-    // Clean-Up
-    releaseDeviceResource(*rsrc);
-    setInferenceContext(nullptr); // Clear the context when done
-}
-
-Qwen3vlModel::Qwen3vlModel(const Qwen3vlMeta *_meta, const Qwen3vlWeights *weights) : meta(*_meta) {
-    auto device_weights = weights->device_weights;
-    int ndev = device_weights.size();
-    device = device_weights[0]->device;
-    dev_ids.resize(ndev);
-    for (int i = 0; i < ndev; i++) {
-        dev_ids[i] = device_weights[i]->dev_id;
-    }
-    dev_resources = std::vector<Qwen3vlDeviceResource>(ndev);
-    states = std::vector<InferState>(ndev);
-    threads.resize(ndev);
-    RUN_INFINI(infinirtInit());
-    auto comms = std::vector<infinicclComm_t>(ndev, nullptr);
-    if (ndev > 1) {
-        RUN_INFINI(infinicclCommInitAll(device, comms.data(), ndev, dev_ids.data()));
-    }
-    for (int i = 0; i < ndev; i++) {
-        threads[i] = std::thread(launchDevice, std::cref(meta), device_weights[i], &dev_resources[i], std::ref(states[i]), std::ref(req), device, i, ndev, dev_ids[i], comms[i]);
-    }
-    for (int i = 0; i < ndev; i++) {
-        std::unique_lock<std::mutex> lock(states[i].mtx);
-        states[i].cv_load.wait(lock, [&] { return states[i].loaded; });
-        lock.unlock();
-    }
-}
-
-__INFINI_C struct Qwen3vlModel *
-createQwen3vlModel(const Qwen3vlMeta *_meta,
-                   const Qwen3vlWeights *weights) {
-    Qwen3vlModel *model = new Qwen3vlModel(_meta, weights);
-    return model;
-}
-
-__INFINI_C void
-destroyQwen3vlModel(struct Qwen3vlModel *model) {
-    auto ndev = model->dev_resources.size();
-
-    for (size_t idev = 0; idev < ndev; idev++) {
-        std::unique_lock<std::mutex> lock(model->states[idev].mtx);
-        model->states[idev].exit_flag = true;
-        lock.unlock();
-        model->states[idev].cv_start.notify_one();
-    }
-
-    for (size_t idev = 0; idev < ndev; idev++) {
-        model->threads[idev].join();
-    }
-
-    delete model;
+    Qwen3vlInferRequest req{};
+    req.tokens               = tokens;
+    req.ntok                 = ntok;
+    req.pixel_values         = pixel_values;
+    req.total_patches        = total_patches;
+    req.image_grid_thw       = image_grid_thw;
+    req.num_images           = num_images;
+    req.pixel_values_videos  = pixel_values_videos;
+    req.total_patches_videos = total_patches_videos;
+    req.video_grid_thw       = video_grid_thw;
+    req.num_videos           = num_videos;
+    req.patch_features       = patch_features;
+    req.req_lens             = req_lens;
+    req.nreq                 = nreq;
+    req.req_pos              = req_pos;
+    req.kv_caches            = kv_caches;
+    req.temperature          = nullptr;
+    req.topk                 = nullptr;
+    req.topp                 = nullptr;
+    req.output               = nullptr;
+    req.logits               = logits;
+    Qwen3vlInferState::sync_cnt = model->ndev();
+    model->dispatch(req);
 }

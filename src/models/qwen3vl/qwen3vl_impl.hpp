@@ -1,3 +1,4 @@
+// src/models/qwen3vl/qwen3vl_impl.hpp
 #ifndef QWEN3VL_IMPL_H
 #define QWEN3VL_IMPL_H
 
@@ -5,53 +6,40 @@
 
 #include "../../allocator.hpp"
 #include "../../tensor.hpp"
+#include "../model_base.hpp"
 
-#include <condition_variable>
 #include <memory>
-#include <mutex>
-#include <thread>
 #include <vector>
 
+// ─── Weight structs (unchanged) ────────────────────────────────────────────
 struct Qwen3vlLayerWeight {
-    std::shared_ptr<Tensor> attn_norm;
-    std::shared_ptr<Tensor> attn_qkv_proj;
-    std::shared_ptr<Tensor> attn_q_norm;
-    std::shared_ptr<Tensor> attn_k_norm;
-    std::shared_ptr<Tensor> attn_o_proj;
-
-    std::shared_ptr<Tensor> mlp_norm;
-    std::shared_ptr<Tensor> mlp_gate_up;
-    std::shared_ptr<Tensor> mlp_down;
+    std::shared_ptr<Tensor> attn_norm, attn_qkv_proj, attn_q_norm, attn_k_norm,
+        attn_o_proj, mlp_norm, mlp_gate_up, mlp_down;
 };
-
 struct Qwen3vlLanguageModelWeight {
     std::shared_ptr<Tensor> in_embd, out_embd, out_norm;
     std::vector<Qwen3vlLayerWeight> layers;
 };
-
 struct Qwen3vlVisBlockWeight {
     std::shared_ptr<Tensor> attn_proj_weight, attn_proj_bias, attn_qkv_weight, attn_qkv_bias;
-    std::shared_ptr<Tensor> mlp_linear_fc1_weight, mlp_linear_fc1_bias, mlp_linear_fc2_weight, mlp_linear_fc2_bias;
+    std::shared_ptr<Tensor> mlp_linear_fc1_weight, mlp_linear_fc1_bias,
+        mlp_linear_fc2_weight, mlp_linear_fc2_bias;
     std::shared_ptr<Tensor> norm1_weight, norm1_bias, norm2_weight, norm2_bias;
 };
-
 struct DeepstackMergerWeight {
-    std::shared_ptr<Tensor> linear_fc1_weight, linear_fc1_bias, linear_fc2_weight, linear_fc2_bias;
-    std::shared_ptr<Tensor> norm_weight, norm_bias;
+    std::shared_ptr<Tensor> linear_fc1_weight, linear_fc1_bias,
+        linear_fc2_weight, linear_fc2_bias, norm_weight, norm_bias;
 };
-
 struct MergerWeight {
-    std::shared_ptr<Tensor> linear_fc1_weight, linear_fc1_bias, linear_fc2_weight, linear_fc2_bias;
-    std::shared_ptr<Tensor> norm_weight, norm_bias;
+    std::shared_ptr<Tensor> linear_fc1_weight, linear_fc1_bias,
+        linear_fc2_weight, linear_fc2_bias, norm_weight, norm_bias;
 };
-
 struct Qwen3vlVisualEncoderWeight {
     std::shared_ptr<Tensor> patch_embed_weight, patch_embed_bias, pos_embed_weight;
     std::vector<Qwen3vlVisBlockWeight> blocks;
     std::vector<DeepstackMergerWeight> deepstack_mergers;
     std::shared_ptr<MergerWeight> merger;
 };
-
 struct Qwen3vlDeviceWeights {
     std::shared_ptr<Tensor> sin_table, cos_table;
     std::shared_ptr<Qwen3vlLanguageModelWeight> w_lang;
@@ -60,82 +48,78 @@ struct Qwen3vlDeviceWeights {
     int dev_id;
     infinirtStream_t load_stream;
 };
-
 struct Qwen3vlWeights {
     Qwen3vlMeta const *meta;
     bool transpose_weight;
     std::vector<std::shared_ptr<Qwen3vlDeviceWeights>> device_weights;
-
-    Qwen3vlWeights(const Qwen3vlMeta *meta,
-                   infiniDevice_t device,
-                   int ndev,
-                   const int *dev_ids,
-                   bool transpose_weight);
+    Qwen3vlWeights(const Qwen3vlMeta *meta, infiniDevice_t device,
+                   int ndev, const int *dev_ids, bool transpose_weight);
 };
 
-struct Qwen3vlDeviceResource {
-    // Device
-    infiniDevice_t device;
-    int device_id;
-    infiniopHandle_t handle;
-    // Weights
-    std::shared_ptr<Qwen3vlDeviceWeights> weights;
-    // Streams
-    infinirtStream_t stream;
-    // Communicator
-    infinicclComm_t comm;
-
-    std::shared_ptr<MemoryPool> memory_pool;
-};
-
-struct InferState { // qwen3vl namespace
-    inline static std::mutex mtx_sync;
-    inline static int sync_cnt;
-    inline static std::condition_variable cv_sync;
-    std::mutex mtx;
-    std::condition_variable cv_load, cv_start, cv_done;
-    bool loaded = false;
-    bool proceed = false;
-    bool exit_flag = false;
-};
-
-struct InferRequest { // qwen3vl namespace
-    const uint32_t *tokens;
-    uint32_t ntok;
-    void *pixel_values;
-    uint32_t total_patches;
-    uint32_t *image_grid_thw;
-    uint32_t num_images;
-    void *pixel_values_videos;
-    uint32_t total_patches_videos;
-    uint32_t *video_grid_thw;
-    uint32_t num_videos;
-    uint32_t patch_features;
-    const uint32_t *req_lens;
-    uint32_t nreq;
-    const uint32_t *req_pos;
-    struct Qwen3vlCache **kv_caches;
-    const float *temperature;
-    const uint32_t *topk;
-    const float *topp;
-    uint32_t *output;
-    void *logits;
-};
-
-struct Qwen3vlModel {
-    Qwen3vlMeta meta;
-    infiniDevice_t device;
-    std::vector<int> dev_ids;
-    std::vector<Qwen3vlDeviceResource> dev_resources;
-    std::vector<InferState> states;
-    std::vector<std::thread> threads;
-    InferRequest req;
-
-    Qwen3vlModel(const Qwen3vlMeta *, const Qwen3vlWeights *weights);
-};
-
+// ─── Cache (unchanged) ─────────────────────────────────────────────────────
 struct Qwen3vlCache {
     std::vector<std::vector<std::shared_ptr<Tensor>>> k_rot, v;
+};
+
+// ─── Custom State: adds static barrier for vision-device sync ──────────────
+// The three static members are accessed by inferDeviceBatch as
+// Qwen3vlInferState::mtx_sync, ::sync_cnt, ::cv_sync — no instance needed.
+struct Qwen3vlInferState : public ModelInferState {
+    inline static std::mutex              mtx_sync;
+    inline static int                     sync_cnt = 0;
+    inline static std::condition_variable cv_sync;
+};
+
+// ─── Custom Request: vision fields + Qwen3vlCache** ───────────────────────
+struct Qwen3vlInferRequest {
+    const uint32_t    *tokens;
+    uint32_t           ntok;
+    void              *pixel_values;
+    uint32_t           total_patches;
+    uint32_t          *image_grid_thw;
+    uint32_t           num_images;
+    void              *pixel_values_videos;
+    uint32_t           total_patches_videos;
+    uint32_t          *video_grid_thw;
+    uint32_t           num_videos;
+    uint32_t           patch_features;
+    const uint32_t    *req_lens;
+    uint32_t           nreq;
+    const uint32_t    *req_pos;
+    struct Qwen3vlCache **kv_caches;
+    const float       *temperature;
+    const uint32_t    *topk;
+    const float       *topp;
+    uint32_t          *output;
+    void              *logits;
+};
+
+// ─── Device resource ───────────────────────────────────────────────────────
+struct Qwen3vlDeviceResource : public DeviceResourceBase {
+    std::shared_ptr<Qwen3vlDeviceWeights> weights;
+};
+
+// ─── Model ─────────────────────────────────────────────────────────────────
+struct Qwen3vlModel
+    : public ModelBase<Qwen3vlMeta, Qwen3vlDeviceResource,
+                       Qwen3vlInferRequest, Qwen3vlInferState>
+{
+    Qwen3vlModel(const Qwen3vlMeta *meta, const Qwen3vlWeights *weights);
+
+    // Expose ndev for C API functions that need to set Qwen3vlInferState::sync_cnt
+    int ndev() const { return static_cast<int>(dev_ids_.size()); }
+
+protected:
+    void createDeviceResource(Qwen3vlDeviceResource *rsrc,
+                              int idev, int ndev,
+                              int dev_id, infinicclComm_t comm) override;
+    void releaseDeviceResource(Qwen3vlDeviceResource &rsrc) override;
+    void inferDeviceBatch(Qwen3vlDeviceResource &rsrc,
+                          int idev, int ndev,
+                          const Qwen3vlInferRequest &req) override;
+
+private:
+    const Qwen3vlWeights *weights_;
 };
 
 #endif
