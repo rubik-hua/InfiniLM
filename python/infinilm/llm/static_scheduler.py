@@ -4,6 +4,7 @@ Static Scheduler - Single-batch request scheduling for Static KV Cache.
 
 import logging
 import queue
+import os
 import janus
 from typing import List, Optional
 
@@ -60,9 +61,17 @@ class StaticSchedulerOutput:
             tokens = req.get_input_tokens()
             prefix_hit_len = self.prefix_hit_len
             input_tokens = tokens[prefix_hit_len:]
-            input_ids = [input_tokens]
-            position_ids = [list(range(prefix_hit_len, len(tokens)))]
-            past_kv_len = prefix_hit_len
+            if len(input_tokens) == 0:
+                # Full prefix hit: avoid empty tensor conversion in model input path.
+                # Recompute the last prompt token as a one-token prefill step.
+                input_tokens = [tokens[-1]]
+                input_ids = [input_tokens]
+                position_ids = [[len(tokens) - 1]]
+                past_kv_len = len(tokens) - 1
+            else:
+                input_ids = [input_tokens]
+                position_ids = [list(range(prefix_hit_len, len(tokens)))]
+                past_kv_len = prefix_hit_len
             total_kv_len = len(tokens)
             input_offsets = [0, len(input_tokens)]
         else:
@@ -106,6 +115,11 @@ class StaticScheduler:
         self.max_cache_len = max_cache_len
         self.cached_block_hashes: List[int] = []
         self.pending_block_hashes: List[int] = []
+        # Safety switch: disable cross-request prefix reuse when investigating
+        # corrupted/contaminated generations.
+        self.disable_prefix_reuse = os.getenv(
+            "INFINILM_STATIC_DISABLE_PREFIX_REUSE", "0"
+        ) in ("1", "true", "True", "yes", "on")
 
     def add_request(self, request: InferenceRequest):
         if request is not None:
@@ -205,6 +219,8 @@ class StaticScheduler:
             num_full_blocks = prompt_len // _BLOCK_SIZE
             matched = 0
 
+            if self.disable_prefix_reuse and self.cached_block_hashes:
+                self.cached_block_hashes.clear()
             self.pending_block_hashes.clear()
 
             for i in range(num_full_blocks):

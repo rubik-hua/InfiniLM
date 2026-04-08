@@ -30,4 +30,7 @@ __pycache__/
 
 *.http
 
-*.nsys-rep
+**/*.nsys-rep
+**/*.jsonl
+*.jsonl
+**/*.mem

@@ -95,8 +95,15 @@ class LLMEngine:
         )
 
         # Load model weights
+        dtype_map = {
+            "float16": infinicore.float16,
+            "bfloat16": infinicore.bfloat16,
+            "float32": infinicore.float32,
+        }
         load_model_state_dict_by_file(
-            self.model_engine, config.model_path, dtype=self.model_engine.config.dtype
+            self.model_engine,
+            config.model_path,
+            dtype=dtype_map.get(config.dtype, self.model_engine.config.dtype),
         )
 
         # Initialize tokenizer
@@ -371,6 +378,7 @@ class LLMEngine:
             conversation=messages,
             add_generation_prompt=add_generation_prompt,
             tokenize=False,
+            continue_final_message=not add_generation_prompt,
             **chat_template_kwargs,
         )
 
