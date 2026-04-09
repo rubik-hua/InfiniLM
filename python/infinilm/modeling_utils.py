@@ -95,8 +95,7 @@ def load_state_dict(
             )
 
         for k in f.keys():
-            # Explicitly cast dtype: some ops (e.g. embedding) may not support BF16 on all backends.
-            state_dict[k] = f.get_tensor(k).to(device=device, dtype=dtype)
+            state_dict[k] = f.get_tensor(k).to(device=device)
 
     return state_dict
 

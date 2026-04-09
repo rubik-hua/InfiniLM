@@ -1,5 +1,4 @@
 import time
-import os
 from dataclasses import dataclass
 
 import infinicore
@@ -79,7 +78,9 @@ class InferEngine(_infinilm.InferEngine):
         try:
             # TODO: Remove `_underlying` and simplify the corresponding code.
             input_ids = input_ids._underlying if input_ids is not None else None
-            position_ids = position_ids._underlying if position_ids is not None else None
+            position_ids = (
+                position_ids._underlying if position_ids is not None else None
+            )
             past_kv_lengths = (
                 past_kv_lengths._underlying if past_kv_lengths is not None else None
             )
@@ -133,7 +134,6 @@ class InferEngine(_infinilm.InferEngine):
             eos_token_id = generation_config.eos_token_id
 
         past_seq_len = 0
-
         output_ids = []
         initial_batch_size, initial_seqlen = input_ids.shape[:2]
         seq_len = initial_seqlen
@@ -291,6 +291,7 @@ class InferEngine(_infinilm.InferEngine):
                 top_k=generation_config.top_k,
                 top_p=generation_config.top_p,
             )
+
             output_ids.append(output_id)
 
             if (
