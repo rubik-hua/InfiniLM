@@ -3,7 +3,9 @@
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/infllmv2_attention.hpp"
 #include "infinicore/ops/simple_gla_attention.hpp"
+#include "infinicore/ops/simple_gla_decode_step.hpp"
 #include "infinicore/ops/simple_gla_prefill.hpp"
+#include "infinicore/ops/simple_gla_recurrent_state_append.hpp"
 #include "infinicore/context/context.hpp"
 #include "../debug_utils/tensor_utils.hpp"
 
@@ -43,6 +45,19 @@ std::vector<float> build_slope_tensor(size_t n) {
     return first;
 }
 
+} // namespace
+
+namespace {
+void ensure_gla_state_allocated(infinicore::Tensor &state,
+                               const infinicore::Device &device,
+                               size_t batch_size,
+                               size_t n_h,
+                               size_t head_dim) {
+    const std::vector<size_t> want = {batch_size, n_h, head_dim, head_dim};
+    if (!state || state->shape() != want || state->dtype() != infinicore::DataType::F32 || state->device() != device) {
+        state = infinicore::Tensor::zeros(want, infinicore::DataType::F32, device);
+    }
+}
 } // namespace
 
 MiniCPMSALAAttention::MiniCPMSALAAttention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -162,7 +177,11 @@ void MiniCPMSALAAttention::set_rotary_emb(const std::shared_ptr<infinicore::nn::
 }
 
 void MiniCPMSALAAttention::reset_cache() {
-    // KV state is maintained by the shared engine cache (StaticKVCache).
+    // KV tensors are maintained by the shared engine cache (StaticKVCache).
+    // Lightning decode recurrent state is maintained locally for performance.
+    gla_state_valid_ = false;
+    gla_state_cached_len_ = 0;
+    gla_state_ = {};
 }
 
 
@@ -318,34 +337,47 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
         auto k_bthd = k_use->permute({0, 2, 1, 3})->contiguous(); // [B, S_kv, H, D]
         auto v_bthd = v_use->permute({0, 2, 1, 3})->contiguous(); // [B, S_kv, H, D]
 
-        // Lightning GLA decode must use recurrent state (StaticKVCache) whenever available.
-        const bool is_lightning_decode = has_cache_meta && static_kv_cache && (seq_len < total_seq_len);
-        if (is_lightning_decode && !static_kv_cache->has_gla_recurrent_state()) {
-            throw std::runtime_error(
-                "MiniCPMSALAAttention(lightning): Lightning decode requires StaticKVCache gla_recurrent_state "
-                "(missing recurrent buffer in StaticKVCache).");
-        }
+        // Lightning fast decode: maintain recurrent state locally (do NOT depend on StaticKVCache extensions).
+        // We rebuild state on-demand if it is out-of-sync with cache_pos.
+        const bool is_decode = has_cache_meta && static_kv_cache && (seq_len == 1) && (total_seq_len > 1);
+        if (is_decode) {
+            ensure_gla_state_allocated(gla_state_, q_bthd->device(), batch_size, n_h, head_dim_);
 
-        const bool recurrent_gla = static_kv_cache && static_kv_cache->has_gla_recurrent_state() && has_cache_meta;
+            // Ensure `state` corresponds to exactly `cache_pos` cached tokens (excluding current token).
+            if (!gla_state_valid_ || gla_state_cached_len_ != cache_pos) {
+                // Rebuild from available KV. This is O(T) once after reset / mismatch.
+                infinicore::op::zeros_(gla_state_);
+                if (cache_pos > 0) {
+                    auto k_prev = k_bthd->narrow({{1, 0, cache_pos}});
+                    auto v_prev = v_bthd->narrow({{1, 0, cache_pos}});
+                    infinicore::op::simple_gla_recurrent_state_append_segment(gla_state_, k_prev, v_prev, g_gamma_);
+                }
+                gla_state_cached_len_ = cache_pos;
+                gla_state_valid_ = true;
+            }
 
-        infinicore::Tensor gla_out;
-        if (recurrent_gla && seq_len == 1 && total_seq_len > 1) {
-            auto S = static_kv_cache->gla_recurrent_state_for_layer(cache_layer_idx_);
-            auto q_new = q_bthd;
+            // Decode-step uses only the newest KV at position (total_seq_len - 1).
+            auto q_new = q_bthd; // [B,1,H,D]
             auto k_new = k_bthd->narrow({{1, total_seq_len - 1, 1}});
             auto v_new = v_bthd->narrow({{1, total_seq_len - 1, 1}});
-            gla_out = infinicore::op::simple_gla_decode_step(q_new, k_new, v_new, S, g_gamma_, scaling_);
+            auto out_b1hd = infinicore::op::simple_gla_decode_step(q_new, k_new, v_new, gla_state_, g_gamma_, scaling_);
+            gla_state_cached_len_ = cache_pos + 1;
+            attn_output = out_b1hd->view({batch_size, seq_len, n_h * head_dim_});
+            // Fall through to output norm/gate + o_proj below (do not run full-sequence GLA again).
         } else {
+            // Prefill / non-decode batching: non-recurrent kernels, then update local recurrent state.
             infinicore::Tensor q_full;
             if (seq_len == total_seq_len) {
                 q_full = q_bthd;
             } else {
-                // Decode: q has seq_len (e.g. 1), kv has total_seq_len; pad q to [B, total_seq_len, H, D].
+                // q shorter than KV: pad q to [B, total_seq_len, H, D].
                 q_full = infinicore::Tensor::zeros(
                     {batch_size, total_seq_len, n_h, head_dim_}, q_bthd->dtype(), q_bthd->device());
                 auto q_slot = q_full->narrow({{1, total_seq_len - seq_len, seq_len}});
                 q_slot->copy_from(q_bthd);
             }
+
+            infinicore::Tensor gla_out;
             // Fused prefill: naive kernel for head_dim<=64; chunked/tiled kernel for head_dim>64 (e.g. 128).
             bool use_fused_prefill = (batch_size == 1) && (seq_len == total_seq_len);
             if (use_fused_prefill) {
@@ -354,24 +386,27 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
                 gla_out = infinicore::op::simple_gla_attention(q_full, k_bthd, v_bthd, g_gamma_, scaling_);
             }
 
-            // Keep per-layer recurrent state aligned with simple_gla_attention / prefill outputs.
-            // Use batched GEMM (CUDA+ATen) instead of O(seq_len) decode_step launches; see
-            // simple_gla_recurrent_state_append_segment (closed form: S <- g^L S + Σ g^{L-1-j} outer(k,v)).
-            if (recurrent_gla) {
-                auto S = static_kv_cache->gla_recurrent_state_for_layer(cache_layer_idx_);
-                if (cache_pos == 0) {
-                    infinicore::op::zeros_(S);
-                }
+            // Keep local recurrent state in sync for subsequent decode steps.
+            ensure_gla_state_allocated(gla_state_, q_bthd->device(), batch_size, n_h, head_dim_);
+            if (cache_pos == 0) {
+                infinicore::op::zeros_(gla_state_);
+                gla_state_cached_len_ = 0;
+                gla_state_valid_ = true;
+            }
+            // Append the segment we just wrote: [cache_pos, cache_pos + seq_len)
+            if (gla_state_valid_ && gla_state_cached_len_ == cache_pos) {
                 auto k_seg = k_bthd->narrow({{1, cache_pos, seq_len}});
                 auto v_seg = v_bthd->narrow({{1, cache_pos, seq_len}});
-                infinicore::op::simple_gla_recurrent_state_append_segment(S, k_seg, v_seg, g_gamma_);
+                infinicore::op::simple_gla_recurrent_state_append_segment(gla_state_, k_seg, v_seg, g_gamma_);
+                gla_state_cached_len_ = cache_pos + seq_len;
+            } else {
+                // Out-of-sync; force rebuild next time we need recurrent decode.
+                gla_state_valid_ = false;
             }
-        }
 
-        infinicore::Tensor out_slice = (recurrent_gla && seq_len == 1 && total_seq_len > 1)
-                                           ? gla_out
-                                           : gla_out->narrow({{1, total_seq_len - seq_len, seq_len}});
-        attn_output = out_slice->view({batch_size, seq_len, n_h * head_dim_});
+            infinicore::Tensor out_slice = gla_out->narrow({{1, total_seq_len - seq_len, seq_len}});
+            attn_output = out_slice->view({batch_size, seq_len, n_h * head_dim_});
+        }
     } else {
         // minicpm4 layers must use InfLLM-v2 attention (hard error if not available).
         // NOTE: Lightning layers keep Simple GLA for correctness; only minicpm4 routes here.

@@ -4,7 +4,6 @@
 #include "../utils.hpp"
 #include "infinicore/ops.hpp"
 #include <stdexcept>
-#include <cstdlib>
 
 namespace infinilm::cache {
 // ==========================
@@ -46,9 +45,7 @@ StaticKVCache::StaticKVCache(
     infinicore::Size max_positional_embedding,
     infinicore::DataType dtype,
     const StaticKVCacheConfig &config,
-    const engine::distributed::RankInfo &rank_info,
-    infinicore::Size gla_recurrent_num_heads,
-    infinicore::Size gla_recurrent_head_dim)
+    const engine::distributed::RankInfo &rank_info)
     : Cache(),
       k_dim_(k_dim),
       v_dim_(v_dim),
@@ -57,9 +54,7 @@ StaticKVCache::StaticKVCache(
       rank_batch_size_(config.max_batch_size()),
       cache_len_(config.max_cache_len() == std::numeric_limits<infinicore::Size>::max() || config.max_cache_len() == 0 ? max_positional_embedding : config.max_cache_len()),
       rank_num_layers_(num_layers),
-      dtype_(dtype),
-      gla_recurrent_num_heads_(gla_recurrent_num_heads),
-      gla_recurrent_head_dim_(gla_recurrent_head_dim) {
+      dtype_(dtype) {
 
     // Allocate K cache
     k_caches_ = infinicore::Tensor::empty(
@@ -80,17 +75,6 @@ StaticKVCache::StaticKVCache(
          v_dim_},
         dtype_,
         rank_info.device);
-
-    if (gla_recurrent_num_heads_ > 0 && gla_recurrent_head_dim_ > 0) {
-        gla_state_ = infinicore::Tensor::zeros(
-            {rank_num_layers_,
-             rank_batch_size_,
-             gla_recurrent_num_heads_,
-             gla_recurrent_head_dim_,
-             gla_recurrent_head_dim_},
-            infinicore::DataType::F32,
-            rank_info.device);
-    }
 }
 
 infinicore::Tensor StaticKVCache::create_layer_kv_cache(
@@ -141,27 +125,12 @@ StaticKVCache::update(size_t layer_idx,
     auto device = k_cache_layer->device();
 
 #ifdef ENABLE_KV_CACHING
-    // Some debug builds have shown incremental decode (update_len=1) may diverge
-    // from full-sequence recompute when using the optimized kv_caching_ kernel.
-    // Provide an env override to fall back to the simple (and slower) copy update.
-    const char *disable_kv_caching = std::getenv("INFINI_DISABLE_KV_CACHING");
-    const bool force_copy_update = disable_kv_caching && disable_kv_caching[0] != '\0' && disable_kv_caching[0] != '0';
-    if (force_copy_update) {
-        size_t cache_pos = reinterpret_cast<int32_t *>(past_sequence_lengths->to(infinicore::Device::cpu())->data())[0];
-        auto result_len = cache_pos + update_len;
-        ASSERT(result_len <= cache_len_);
-        auto k_cache_update = k_cache_layer->narrow({{2, cache_pos, update_len}});
-        auto v_cache_update = v_cache_layer->narrow({{2, cache_pos, update_len}});
-        k_cache_update->copy_from(k);
-        v_cache_update->copy_from(v);
-    } else {
-        infinicore::op::kv_caching_(
-            k_cache_layer,
-            v_cache_layer,
-            k,
-            v,
-            past_sequence_lengths);
-    }
+    infinicore::op::kv_caching_(
+        k_cache_layer,
+        v_cache_layer,
+        k,
+        v,
+        past_sequence_lengths);
 #else
     size_t cache_pos = reinterpret_cast<int32_t *>(past_sequence_lengths->to(infinicore::Device::cpu())->data())[0];
     auto result_len = cache_pos + update_len;
@@ -175,26 +144,6 @@ StaticKVCache::update(size_t layer_idx,
 #endif
 
     return {k_cache_layer, v_cache_layer};
-}
-
-std::tuple<infinicore::Tensor, infinicore::Tensor>
-StaticKVCache::get_layer_kv(size_t layer_idx) {
-    ASSERT(layer_idx < rank_num_layers_);
-    auto k_cache_layer = k_caches_->narrow({{0, layer_idx, 1}})->squeeze(0);
-    auto v_cache_layer = v_caches_->narrow({{0, layer_idx, 1}})->squeeze(0);
-    return {k_cache_layer, v_cache_layer};
-}
-
-bool
-StaticKVCache::has_gla_recurrent_state() const {
-    return gla_recurrent_num_heads_ > 0 && gla_recurrent_head_dim_ > 0 && static_cast<bool>(gla_state_);
-}
-
-infinicore::Tensor
-StaticKVCache::gla_recurrent_state_for_layer(size_t layer_idx) {
-    ASSERT(layer_idx < rank_num_layers_);
-    ASSERT(has_gla_recurrent_state());
-    return gla_state_->narrow({{0, layer_idx, 1}})->squeeze(0);
 }
 
 // ==========================

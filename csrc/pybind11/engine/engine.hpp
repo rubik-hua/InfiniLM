@@ -199,6 +199,6 @@ inline void bind_infer_engine(py::module &m) {
 
     py::class_<InferEngine::Output>(infer_engine, "Output")
         .def_readwrite("output_ids", &InferEngine::Output::output_ids, "Output tensor");
-    }
+}
 
 } // namespace infinilm::engine

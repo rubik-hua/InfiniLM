@@ -36,3 +36,10 @@ private:
 
 } // namespace infinilm::models::minicpm_sala
 
+namespace infinilm::models::minicpm_sala {
+
+std::shared_ptr<infinilm::config::ModelConfig> create_minicpm_sala_model_config(
+    std::shared_ptr<infinilm::config::ModelConfig> model_config);
+
+} // namespace infinilm::models::minicpm_sala
+

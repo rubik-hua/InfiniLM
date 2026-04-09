@@ -1,10 +1,21 @@
 #include "minicpm_sala_for_causal_lm.hpp"
+#include "../models_registry.hpp"
 
 #include "infinicore/ops.hpp"
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace infinilm::models::minicpm_sala {
+
+std::shared_ptr<infinilm::config::ModelConfig> create_minicpm_sala_model_config(
+    std::shared_ptr<infinilm::config::ModelConfig> model_config) {
+    const std::string &model_type = model_config->get<std::string>("model_type");
+    if ("minicpm_sala" != model_type) {
+        throw std::runtime_error("infinilm::models::minicpm_sala::create_minicpm_sala_model_config: model_type is not minicpm_sala");
+    }
+    return model_config;
+}
 
 MiniCPMSALAForCausalLM::MiniCPMSALAForCausalLM(
     std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -60,4 +71,11 @@ const cache::CacheConfig *MiniCPMSALAForCausalLM::get_cache_config() const {
 }
 
 } // namespace infinilm::models::minicpm_sala
+
+namespace {
+INFINILM_REGISTER_CAUSAL_LM_MODEL(
+    minicpm_sala,
+    infinilm::models::minicpm_sala::MiniCPMSALAForCausalLM,
+    infinilm::models::minicpm_sala::create_minicpm_sala_model_config);
+} // namespace
 

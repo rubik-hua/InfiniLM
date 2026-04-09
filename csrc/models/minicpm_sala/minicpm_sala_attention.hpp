@@ -97,6 +97,12 @@ protected:
 
     // Lightning layers only: per-head log-decay for Simple GLA (HF _build_slope_tensor * -1).
     infinicore::Tensor g_gamma_;
+
+    // Lightning layers only: recurrent state for fast decode.
+    // Shape: [B, H, D, D] float32. Tracks how many KV tokens are folded into the state.
+    mutable infinicore::Tensor gla_state_;
+    mutable size_t gla_state_cached_len_ = 0;
+    mutable bool gla_state_valid_ = false;
 };
 
 } // namespace infinilm::models::minicpm_sala

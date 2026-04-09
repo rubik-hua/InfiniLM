@@ -12,7 +12,6 @@
 #include <memory>
 #include <numeric>
 #include <stdexcept>
-#include <cstdlib>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -44,9 +43,7 @@ public:
         infinicore::Size max_positional_embedding,
         infinicore::DataType dtype,
         const StaticKVCacheConfig &config,
-        const engine::distributed::RankInfo &rank_info,
-        infinicore::Size gla_recurrent_num_heads = 0,
-        infinicore::Size gla_recurrent_head_dim = 0);
+        const engine::distributed::RankInfo &rank_info);
 
     static infinicore::Tensor create_layer_kv_cache(
         const infinicore::Size k_dim,
@@ -75,20 +72,6 @@ public:
            const infinicore::Tensor &v,
            const infinicore::Tensor &past_sequence_lengths);
 
-    /**
-     * @brief Get KV cache tensors for a layer (views).
-     *
-     * @return (k_cache_layer, v_cache_layer)
-     *         k_cache_layer: [batch, num_rank_k_heads, max_cache_len, k_dim]
-     *         v_cache_layer: [batch, num_rank_v_heads, max_cache_len, v_dim]
-     */
-    std::tuple<infinicore::Tensor, infinicore::Tensor>
-    get_layer_kv(size_t layer_idx);
-
-    /** Per-layer Simple GLA recurrent state for lightning decode: [batch, H, D, D] float32 (in-place for decode_step). */
-    bool has_gla_recurrent_state() const;
-    infinicore::Tensor gla_recurrent_state_for_layer(size_t layer_idx);
-
     ~StaticKVCache() override = default;
 
 private:
@@ -106,12 +89,6 @@ private:
 
     // [num_layers, max_batch, num_rank_v_heads, max_cache_len, v_dim]
     infinicore::Tensor v_caches_;
-
-    infinicore::Size gla_recurrent_num_heads_{0};
-    infinicore::Size gla_recurrent_head_dim_{0};
-    // [num_layers, max_batch, gla_recurrent_num_heads, D, D], F32; empty when heads==0
-    infinicore::Tensor gla_state_;
-
 };
 
 class PagedKVCacheConfig final : public CacheConfig {
