@@ -48,7 +48,7 @@ MiniCPMSALAModel::MiniCPMSALAModel(std::shared_ptr<infinilm::config::ModelConfig
     layers_.reserve(num_layers);
     for (size_t i = 0; i < num_layers; ++i) {
         layers_.push_back(this->register_module<MiniCPMSALADecoderLayer>(
-            "layers." + std::to_string(i), model_config_, device, i, mixer_types[i], rank_info, attention_backend));
+            "layers." + std::to_string(i), model_config_, device, i, mixer_types[i]));
     }
 }
 
@@ -59,21 +59,7 @@ void MiniCPMSALAModel::reset_state() {
 }
 
 infinicore::Tensor MiniCPMSALAModel::forward(const infinicore::Tensor &input_ids,
-                                             const infinicore::Tensor &position_ids,
-                                             std::optional<infinicore::Tensor> past_sequence_lengths,
-                                             std::optional<infinicore::Tensor> total_sequence_lengths,
-                                             std::optional<infinicore::Tensor> input_offsets,
-                                             std::optional<infinicore::Tensor> cu_seqlens,
-                                             std::optional<infinicore::Tensor> block_tables,
-                                             std::optional<infinicore::Tensor> slot_mapping) const {
-    infinilm::global_state::get_forward_context().attn_metadata =
-        infinilm::global_state::AttentionMetadata(past_sequence_lengths,
-                                                  total_sequence_lengths,
-                                                  input_offsets,
-                                                  cu_seqlens,
-                                                  block_tables,
-                                                  slot_mapping);
-
+                                             const infinicore::Tensor &position_ids) const {
     // MuP scaling baked into weights at load time for minicpm_sala; no forward scaling here.
     auto hs = embed_tokens_->forward(input_ids);
 

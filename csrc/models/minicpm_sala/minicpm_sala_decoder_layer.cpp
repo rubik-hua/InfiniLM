@@ -1,5 +1,6 @@
 #include "minicpm_sala_decoder_layer.hpp"
 
+#include "../../global_state/global_state.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/context/context.hpp"
 #include <cmath>
@@ -15,9 +16,7 @@ namespace infinilm::models::minicpm_sala {
 MiniCPMSALADecoderLayer::MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                                  const infinicore::Device &device,
                                                  size_t layer_idx,
-                                                 const std::string &mixer_type,
-                                                 engine::distributed::RankInfo rank_info,
-                                                 backends::AttentionBackend attention_backend) {
+                                                 const std::string &mixer_type) {
     layer_idx_ = layer_idx;
     // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
     const auto dtype = model_config->get_dtype();
@@ -29,7 +28,13 @@ MiniCPMSALADecoderLayer::MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::confi
     residual_scale_ = scale_depth / std::sqrt(static_cast<double>(num_layers));
 
     INFINICORE_NN_MODULE_INIT(input_layernorm, model_config->get<size_t>("hidden_size"), eps, dtype, device);
-    INFINICORE_NN_MODULE_INIT(self_attn, model_config, device, layer_idx, mixer_type, rank_info, attention_backend);
+    if (mixer_type == "minicpm4") {
+        self_attn_ = this->register_module<MiniCPMSALAMinicpm4Attention>(
+            "self_attn", model_config, device, layer_idx);
+    } else {
+        self_attn_ = this->register_module<MiniCPMSALALightningAttention>(
+            "self_attn", model_config, device, layer_idx);
+    }
     INFINICORE_NN_MODULE_INIT(post_attention_layernorm, model_config->get<size_t>("hidden_size"), eps, dtype, device);
     INFINICORE_NN_MODULE_INIT(mlp, model_config, device);
 }

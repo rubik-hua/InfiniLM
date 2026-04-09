@@ -41,7 +41,7 @@ void minicpm_sala_update_layer_kv_tensor(infinicore::Tensor &kv_bundle,
     const size_t update_len = k_permuted->size(2);
     const size_t result_len = cache_pos + update_len;
     if (result_len > k_cache_layer->size(2)) {
-        throw std::runtime_error("MiniCPMSALAAttention: KV cache length exceeded");
+        throw std::runtime_error("MiniCPMSALAAttention(KV update): KV cache length exceeded");
     }
     k_cache_layer->narrow({{2, cache_pos, update_len}})->copy_from(k_permuted);
     v_cache_layer->narrow({{2, cache_pos, update_len}})->copy_from(v_permuted);
@@ -90,81 +90,39 @@ void ensure_gla_state_allocated(infinicore::Tensor &state,
 }
 } // namespace
 
-MiniCPMSALAAttention::MiniCPMSALAAttention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                                           const infinicore::Device &device,
-                                           size_t layer_idx,
-                                           const std::string &mixer_type,
-                                           engine::distributed::RankInfo rank_info,
-                                           backends::AttentionBackend attention_backend)
+MiniCPMSALALightningAttention::MiniCPMSALALightningAttention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
+                                                             const infinicore::Device &device,
+                                                             size_t layer_idx)
     : model_config_(std::move(model_config)),
-      rank_info_(rank_info),
-      layer_idx_(layer_idx),
-      attention_backend_(attention_backend) {
-
-    // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
+      layer_idx_(layer_idx) {
     const auto dtype = model_config_->get_dtype();
+    attention_backend_ = infinilm::global_state::get_infinilm_config().attention_backend;
     hidden_size_ = model_config_->get<size_t>("hidden_size");
-    if (mixer_type == "minicpm4") {
-        is_sparse_layer_ = true;
-        num_attention_heads_ = model_config_->get<size_t>("num_attention_heads");
-        num_key_value_heads_ = model_config_->get<size_t>("num_key_value_heads");
-        head_dim_ = model_config_->get<size_t>("head_dim");
 
-        // InfLLM-v2 local-window masking (causal-local semantics) for minicpm4.
-        // Prefer `sparse_window_size`, but fall back to `window_size` if needed.
-        int sparse_window_size = model_config_->get_or<int>("sparse_window_size", -1);
-        if (sparse_window_size <= 0) {
-            // Some HF configs store this under `sparse_config.window_size`.
-            auto sparse_cfg = model_config_->get_or<nlohmann::json>("sparse_config", nlohmann::json{});
-            if (!sparse_cfg.is_null() && sparse_cfg.contains("window_size")) {
-                sparse_window_size = sparse_cfg["window_size"].get<int>();
-            } else {
-                sparse_window_size = model_config_->get_or<int>("window_size", -1);
-            }
-        }
-        if (sparse_window_size > 0) {
-            infllmv2_window_left_ = sparse_window_size;
-            infllmv2_window_right_ = 0;
-            use_local_window_ = true;
-        }
-    } else {
-        // Lightning layers have their own head config.
-        num_attention_heads_ = model_config_->get_or<size_t>("lightning_nh", model_config_->get<size_t>("num_attention_heads"));
-        num_key_value_heads_ = model_config_->get_or<size_t>("lightning_nkv", model_config_->get<size_t>("num_key_value_heads"));
-        head_dim_ = model_config_->get_or<size_t>("lightning_head_dim", model_config_->get<size_t>("head_dim"));
-    }
+    num_attention_heads_ = model_config_->get_or<size_t>("lightning_nh", model_config_->get<size_t>("num_attention_heads"));
+    num_key_value_heads_ = model_config_->get_or<size_t>("lightning_nkv", model_config_->get<size_t>("num_key_value_heads"));
+    head_dim_ = model_config_->get_or<size_t>("lightning_head_dim", model_config_->get<size_t>("head_dim"));
     scaling_ = static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
 
-    // HyPE: RoPE in lightning layers, NoPE in sparse (minicpm4) layers.
-    // We treat all non-minicpm4 as "linear" (lightning-attn) for M1 dense fallback.
-    use_rope_ = (mixer_type != "minicpm4") && model_config_->get_or<bool>("lightning_use_rope", true);
+    use_rope_ = model_config_->get_or<bool>("lightning_use_rope", true);
     rotary_emb_ = infinilm::layers::rotary_embedding::get_rope(model_config_, device);
 
-    // MiniCPM-SALA uses QK-norm and output gates by default.
-    use_qk_norm_ = model_config_->get_or<bool>("qk_norm", true) && (mixer_type != "minicpm4");
+    use_qk_norm_ = model_config_->get_or<bool>("qk_norm", true);
     use_output_gate_ = model_config_->get_or<bool>("use_output_gate", true);
 
-    // Projections
     INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, num_attention_heads_ * head_dim_, false, dtype, device);
     INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
     INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
     INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, false, dtype, device);
 
-    if (mixer_type == "minicpm4") {
-        // Sparse layers use o_gate (sigmoid gate on attention output)
-        INFINICORE_NN_MODULE_INIT(o_gate, hidden_size_, hidden_size_, false, dtype, device);
-    } else {
-        // Lightning layers use q/k norm + output norm and z-projection gate
-        if (use_qk_norm_) {
-            INFINICORE_NN_MODULE_INIT(q_norm, head_dim_, model_config_->get<double>("rms_norm_eps"), dtype, device);
-            INFINICORE_NN_MODULE_INIT(k_norm, head_dim_, model_config_->get<double>("rms_norm_eps"), dtype, device);
-        }
-        use_output_norm_ = true;
-        // Checkpoint uses o_norm over hidden_size (shape [hidden_size]).
-        INFINICORE_NN_MODULE_INIT(o_norm, hidden_size_, model_config_->get<double>("rms_norm_eps"), dtype, device);
-        INFINICORE_NN_MODULE_INIT(z_proj, hidden_size_, hidden_size_, false, dtype, device);
+    if (use_qk_norm_) {
+        INFINICORE_NN_MODULE_INIT(q_norm, head_dim_, model_config_->get<double>("rms_norm_eps"), dtype, device);
+        INFINICORE_NN_MODULE_INIT(k_norm, head_dim_, model_config_->get<double>("rms_norm_eps"), dtype, device);
     }
-    // Simple GLA decay for lightning path: g_gamma = _build_slope_tensor * -1.
+    use_output_norm_ = true;
+    INFINICORE_NN_MODULE_INIT(o_norm, hidden_size_, model_config_->get<double>("rms_norm_eps"), dtype, device);
+    INFINICORE_NN_MODULE_INIT(z_proj, hidden_size_, hidden_size_, false, dtype, device);
+
     std::vector<float> slopes = build_slope_tensor(num_attention_heads_);
     auto g_cpu = infinicore::Tensor::empty(
         {num_attention_heads_}, infinicore::DataType::F32, infinicore::Device::cpu());
@@ -174,17 +132,14 @@ MiniCPMSALAAttention::MiniCPMSALAAttention(std::shared_ptr<infinilm::config::Mod
     g_gamma_ = g_cpu->to(device);
 }
 
-void MiniCPMSALAAttention::reset_state() {
-    // KV tensors are maintained by the shared engine cache (StaticKVCache).
-    // Lightning decode recurrent state is maintained locally for performance.
+void MiniCPMSALALightningAttention::reset_state() {
     gla_state_valid_ = false;
     gla_state_cached_len_ = 0;
     gla_state_ = {};
 }
 
-
-infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &position_ids,
-                                                const infinicore::Tensor &hidden_states) const {
+infinicore::Tensor MiniCPMSALALightningAttention::forward(const infinicore::Tensor &position_ids,
+                                                         const infinicore::Tensor &hidden_states) const {
     const auto &attn_meta = infinilm::global_state::get_forward_context().attn_metadata;
     auto past_sequence_lengths = attn_meta.past_sequence_lengths;
     auto total_sequence_lengths = attn_meta.total_sequence_lengths;
@@ -218,7 +173,7 @@ infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &posit
     // RoPE only for lightning layers (HyPE)
     if (use_rope_) {
         if (!rotary_emb_) {
-            throw std::runtime_error("MiniCPMSALAAttention: rotary_emb is not set but use_rope=true");
+            throw std::runtime_error("MiniCPMSALALightningAttention: rotary_emb is not set but use_rope=true");
         }
         // position_ids can be [B,S] or [S]; follow LlamaAttention behavior.
         auto pos_shape = position_ids->shape();
@@ -229,7 +184,7 @@ infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &posit
         } else if (pos_shape.size() == 1) {
             pos_ids_for_rope = position_ids->contiguous();
         } else {
-            throw std::runtime_error("MiniCPMSALAAttention: Unexpected position_ids shape");
+            throw std::runtime_error("MiniCPMSALALightningAttention: Unexpected position_ids shape");
         }
 
         rotary_emb_->forward(q_reshaped, pos_ids_for_rope, true);
@@ -271,7 +226,7 @@ infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &posit
         auto &kv_vec = infinilm::global_state::get_forward_context().kv_cache_vec;
         if (layer_idx_ >= kv_vec.size()) {
             throw std::runtime_error(
-                "MiniCPMSALAAttention: forward_context.kv_cache_vec is unset or too small (call reset_cache / align layer count)");
+                "MiniCPMSALALightningAttention: forward_context.kv_cache_vec is unset or too small (call reset_cache / align layer count)");
         }
         use_forward_kv = true;
         minicpm_sala_update_layer_kv_tensor(
@@ -289,14 +244,14 @@ infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &posit
 
     // Slice to total_seq_len (decode-only / cont-batch)
     if (total_seq_len > k_total->shape()[2]) {
-        throw std::runtime_error("MiniCPMSALAAttention: total_seq_len exceeds available KV length (cache not correctly updated)");
+        throw std::runtime_error("MiniCPMSALALightningAttention: total_seq_len exceeds available KV length (cache not correctly updated)");
     }
     k_total = k_total->narrow({{2, 0, total_seq_len}});
     v_total = v_total->narrow({{2, 0, total_seq_len}});
 
     infinicore::Tensor attn_output;
-    if (!is_sparse_layer_) {
-        // Lightning-attn: Simple GLA (HF-aligned).
+    {
+        // Lightning-attn only: Simple GLA (HF-aligned).
         // simple_gla_attention(q,k,v,g_gamma,scale) expects [B, T, H, D]; g_gamma [H].
         const size_t n_h = num_attention_heads_;
         const size_t n_kv = num_key_value_heads_;
@@ -398,116 +353,17 @@ infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &posit
             infinicore::Tensor out_slice = gla_out->narrow({{1, total_seq_len - seq_len, seq_len}});
             attn_output = out_slice->view({batch_size, seq_len, n_h * head_dim_});
         }
-    } else {
-        // minicpm4 layers must use InfLLM-v2 attention (hard error if not available).
-        // NOTE: Lightning layers keep Simple GLA for correctness; only minicpm4 routes here.
-        try {
-            if (!total_sequence_lengths.has_value()) {
-                throw std::runtime_error(
-                    "MiniCPMSALAAttention(minicpm4): total_sequence_lengths is required for InfLLM-v2 path");
-            }
-            // `infllmv2_kvcache` expects the number of valid K/V entries in the
-            // provided cache tensors. After per-layer KV update, valid length is
-            // total KV length (past + current token).
-            const auto cache_lens = total_sequence_lengths.value();
-
-            // Prefill: InfLLM-v2 varlen (Q and K packed lengths match `seq_len == total_seq_len` here).
-            // Decode: `seq_len < total_seq_len` — use `infllmv2_kvcache` after KV tensor update
-            // (valid KV length == `total_seq_len`). Using varlen for decode (1 query vs long K) hit NaNs
-            // in practice for modest sequence lengths; kvcache matches operator tests and Flash path.
-            const bool force_varlen_decode = [&]() {
-                const char *env = std::getenv("INFINI_MINICPM4_DECODE_VARLEN");
-                return env && env[0] != '\0' && env[0] != '0';
-            }();
-
-            if (seq_len == total_seq_len || (force_varlen_decode && batch_size == 1)) {
-                if (batch_size != 1) {
-                    throw std::runtime_error("MiniCPMSALAAttention(minicpm4): varlen prefill path currently requires batch_size=1");
-                }
-                auto q_bshd = q_reshaped->contiguous();                     // [B, S, n_h, D]
-                auto k_btkd = k_total->permute({0, 2, 1, 3})->contiguous();  // [B, T, n_kv, D]
-                auto v_btkd = v_total->permute({0, 2, 1, 3})->contiguous();  // [B, T, n_kv, D]
-                auto q_var = q_bshd->view({static_cast<ptrdiff_t>(seq_len), static_cast<ptrdiff_t>(num_attention_heads_), static_cast<ptrdiff_t>(head_dim_)});
-                auto k_var = k_btkd->view({static_cast<ptrdiff_t>(total_seq_len), static_cast<ptrdiff_t>(num_key_value_heads_), static_cast<ptrdiff_t>(head_dim_)});
-                auto v_var = v_btkd->view({static_cast<ptrdiff_t>(total_seq_len), static_cast<ptrdiff_t>(num_key_value_heads_), static_cast<ptrdiff_t>(head_dim_)});
-
-                auto cuq_cpu = infinicore::Tensor::empty({2}, infinicore::DataType::I32, infinicore::Device::cpu());
-                reinterpret_cast<int32_t *>(cuq_cpu->data())[0] = 0;
-                reinterpret_cast<int32_t *>(cuq_cpu->data())[1] = static_cast<int32_t>(seq_len);
-                infinicore::Tensor cu_q = cuq_cpu->to(q_var->device());
-                // cu_k corresponds to the full KV length used by k_var/v_var.
-                auto cuk_cpu = infinicore::Tensor::empty({2}, infinicore::DataType::I32, infinicore::Device::cpu());
-                reinterpret_cast<int32_t *>(cuk_cpu->data())[0] = 0;
-                reinterpret_cast<int32_t *>(cuk_cpu->data())[1] = static_cast<int32_t>(total_seq_len);
-                infinicore::Tensor cu_k = cuk_cpu->to(q_var->device());
-
-                const bool infllmv2_causal = !use_local_window_;
-                const int window_left = use_local_window_ ? infllmv2_window_left_ : -1;
-                const int window_right = use_local_window_ ? 0 : -1;
-
-                auto out_var = infinicore::op::infllmv2_varlen(
-                    q_var, k_var, v_var,
-                    cu_q, cu_k,
-                    static_cast<int>(seq_len),
-                    static_cast<int>(total_seq_len),
-                    scaling_,
-                    /*causal=*/infllmv2_causal,
-                    /*window_size_left=*/window_left,
-                    /*window_size_right=*/window_right);
-                attn_output = out_var->view({batch_size, seq_len, num_attention_heads_ * head_dim_});
-            } else if (use_forward_kv) {
-                if (batch_size != 1) {
-                    throw std::runtime_error("MiniCPMSALAAttention(minicpm4): kvcache decode path currently requires batch_size=1");
-                }
-                auto q_bshd = q_reshaped->contiguous();                     // [B, S_q, n_h, D]
-                auto k_bthd = k_total->permute({0, 2, 1, 3})->contiguous(); // [B, T, n_kv, D]
-                auto v_bthd = v_total->permute({0, 2, 1, 3})->contiguous(); // [B, T, n_kv, D]
-
-                const bool infllmv2_causal = !use_local_window_;
-                const int window_left = use_local_window_ ? infllmv2_window_left_ : -1;
-                const int window_right = use_local_window_ ? 0 : -1;
-
-                auto out_bshd = infinicore::op::infllmv2_kvcache(
-                    q_bshd,
-                    k_bthd,
-                    v_bthd,
-                    cache_lens,
-                    scaling_,
-                    /*causal=*/infllmv2_causal,
-                    /*window_size_left=*/window_left,
-                    /*window_size_right=*/window_right);
-                attn_output = out_bshd->contiguous()->view(
-                    {batch_size, seq_len, num_attention_heads_ * head_dim_});
-            } else {
-                throw std::runtime_error(
-                    "MiniCPMSALAAttention(minicpm4): decode requires KV cache (missing cache metadata or kv_cache_vec)");
-            }
-        } catch (const std::exception &e) {
-            throw std::runtime_error(
-                std::string("MiniCPMSALAAttention(minicpm4): InfLLM-v2 attention failed. ")
-                + "This build must provide InfLLM-v2 (ENABLE_INFLLMV2+ENABLE_ATEN) and the infllmv2_cuda_impl .so "
-                + "must be available via LD_PRELOAD/LD_LIBRARY_PATH. Original error: " + e.what());
-        }
     }
 
-    // Output norm + gate variants
+    // Lightning output gate/norm
     if (use_output_gate_) {
-        if (o_gate_) {
-            // Sparse (minicpm4): y = sigmoid(o_gate(x)) * attn_output
-            auto gate_in = hidden_states;
-            auto gate = o_gate_->forward(gate_in);
-            infinicore::op::sigmoid_(gate, gate);
-            attn_output = infinicore::op::mul(attn_output, gate);
-        } else if (z_proj_) {
-            // Lightning: match HF LightningAttention: o_norm(o) then o * sigmoid(z_proj(x)).
-            auto z_in = hidden_states;
-            auto z = z_proj_->forward(z_in);
-            infinicore::op::sigmoid_(z, z);
-            if (use_output_norm_ && o_norm_) {
-                attn_output = o_norm_->forward(attn_output);
-            }
-            attn_output = infinicore::op::mul(attn_output, z);
+        auto z_in = hidden_states;
+        auto z = z_proj_->forward(z_in);
+        infinicore::op::sigmoid_(z, z);
+        if (use_output_norm_ && o_norm_) {
+            attn_output = o_norm_->forward(attn_output);
         }
+        attn_output = infinicore::op::mul(attn_output, z);
     } else if (use_output_norm_ && o_norm_) {
         attn_output = o_norm_->forward(attn_output);
     }
@@ -516,6 +372,190 @@ infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &posit
     auto out = o_proj_->forward(attn_out_mut);
 
     return out;
+}
+
+MiniCPMSALAMinicpm4Attention::MiniCPMSALAMinicpm4Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
+                                                           const infinicore::Device &device,
+                                                           size_t layer_idx)
+    : model_config_(std::move(model_config)),
+      layer_idx_(layer_idx) {
+    (void)device;
+    const auto dtype = model_config_->get_dtype();
+    attention_backend_ = infinilm::global_state::get_infinilm_config().attention_backend;
+    hidden_size_ = model_config_->get<size_t>("hidden_size");
+    num_attention_heads_ = model_config_->get<size_t>("num_attention_heads");
+    num_key_value_heads_ = model_config_->get<size_t>("num_key_value_heads");
+    head_dim_ = model_config_->get<size_t>("head_dim");
+    scaling_ = static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
+
+    int sparse_window_size = model_config_->get_or<int>("sparse_window_size", -1);
+    if (sparse_window_size <= 0) {
+        auto sparse_cfg = model_config_->get_or<nlohmann::json>("sparse_config", nlohmann::json{});
+        if (!sparse_cfg.is_null() && sparse_cfg.contains("window_size")) {
+            sparse_window_size = sparse_cfg["window_size"].get<int>();
+        } else {
+            sparse_window_size = model_config_->get_or<int>("window_size", -1);
+        }
+    }
+    if (sparse_window_size > 0) {
+        infllmv2_window_left_ = sparse_window_size;
+        infllmv2_window_right_ = 0;
+        use_local_window_ = true;
+    }
+
+    INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, num_attention_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(o_gate, hidden_size_, hidden_size_, false, dtype, device);
+}
+
+void MiniCPMSALAMinicpm4Attention::reset_state() {
+    // no local recurrent state
+}
+
+infinicore::Tensor MiniCPMSALAMinicpm4Attention::forward(const infinicore::Tensor &position_ids,
+                                                        const infinicore::Tensor &hidden_states) const {
+    (void)position_ids;
+    const auto &attn_meta = infinilm::global_state::get_forward_context().attn_metadata;
+    auto past_sequence_lengths = attn_meta.past_sequence_lengths;
+    auto total_sequence_lengths = attn_meta.total_sequence_lengths;
+
+    auto shape = hidden_states->shape();
+    const size_t batch_size = shape[0];
+    const size_t seq_len = shape[1];
+
+    auto hs_mut = hidden_states;
+    auto q = q_proj_->forward(hs_mut);
+    auto k = k_proj_->forward(hs_mut);
+    auto v = v_proj_->forward(hs_mut);
+    auto q_reshaped = q->contiguous()->view({batch_size, seq_len, num_attention_heads_, head_dim_});
+    auto k_reshaped = k->contiguous()->view({batch_size, seq_len, num_key_value_heads_, head_dim_});
+    auto v_reshaped = v->contiguous()->view({batch_size, seq_len, num_key_value_heads_, head_dim_});
+
+    // KV update via per-layer kv_cache_vec when metadata present
+    size_t total_seq_len = seq_len;
+    size_t cache_pos = 0;
+    const bool has_cache_meta = past_sequence_lengths.has_value() && total_sequence_lengths.has_value();
+    if (has_cache_meta) {
+        auto past_cpu = past_sequence_lengths.value()->to(infinicore::Device::cpu());
+        cache_pos = reinterpret_cast<int32_t *>(past_cpu->data())[0];
+        total_seq_len = cache_pos + seq_len;
+    }
+    auto k_permuted = k_reshaped->permute({0, 2, 1, 3})->contiguous();
+    auto v_permuted = v_reshaped->permute({0, 2, 1, 3})->contiguous();
+
+    infinicore::Tensor k_total = k_permuted;
+    infinicore::Tensor v_total = v_permuted;
+    bool use_forward_kv = false;
+    if (has_cache_meta) {
+        auto &kv_vec = infinilm::global_state::get_forward_context().kv_cache_vec;
+        if (layer_idx_ >= kv_vec.size()) {
+            throw std::runtime_error(
+                "MiniCPMSALAMinicpm4Attention: forward_context.kv_cache_vec is unset or too small");
+        }
+        use_forward_kv = true;
+        minicpm_sala_update_layer_kv_tensor(
+            kv_vec[layer_idx_],
+            k_permuted,
+            v_permuted,
+            past_sequence_lengths.value());
+        auto k_cache_layer = kv_vec[layer_idx_]->narrow({{0, 0, 1}})->squeeze(0);
+        auto v_cache_layer = kv_vec[layer_idx_]->narrow({{0, 1, 1}})->squeeze(0);
+        k_total = k_cache_layer;
+        v_total = v_cache_layer;
+    } else {
+        total_seq_len = seq_len;
+    }
+
+    if (total_seq_len > k_total->shape()[2]) {
+        throw std::runtime_error("MiniCPMSALAMinicpm4Attention: total_seq_len exceeds available KV length");
+    }
+    k_total = k_total->narrow({{2, 0, total_seq_len}});
+    v_total = v_total->narrow({{2, 0, total_seq_len}});
+
+    try {
+        if (!total_sequence_lengths.has_value()) {
+            throw std::runtime_error("MiniCPMSALAMinicpm4Attention: total_sequence_lengths is required for InfLLM-v2 path");
+        }
+        const auto cache_lens = total_sequence_lengths.value();
+        const bool force_varlen_decode = [&]() {
+            const char *env = std::getenv("INFINI_MINICPM4_DECODE_VARLEN");
+            return env && env[0] != '\0' && env[0] != '0';
+        }();
+
+        infinicore::Tensor attn_output;
+        if (seq_len == total_seq_len || (force_varlen_decode && batch_size == 1)) {
+            if (batch_size != 1) {
+                throw std::runtime_error("MiniCPMSALAMinicpm4Attention: varlen path requires batch_size=1");
+            }
+            auto q_bshd = q_reshaped->contiguous();
+            auto k_btkd = k_total->permute({0, 2, 1, 3})->contiguous();
+            auto v_btkd = v_total->permute({0, 2, 1, 3})->contiguous();
+            auto q_var = q_bshd->view({static_cast<ptrdiff_t>(seq_len), static_cast<ptrdiff_t>(num_attention_heads_), static_cast<ptrdiff_t>(head_dim_)});
+            auto k_var = k_btkd->view({static_cast<ptrdiff_t>(total_seq_len), static_cast<ptrdiff_t>(num_key_value_heads_), static_cast<ptrdiff_t>(head_dim_)});
+            auto v_var = v_btkd->view({static_cast<ptrdiff_t>(total_seq_len), static_cast<ptrdiff_t>(num_key_value_heads_), static_cast<ptrdiff_t>(head_dim_)});
+
+            auto cuq_cpu = infinicore::Tensor::empty({2}, infinicore::DataType::I32, infinicore::Device::cpu());
+            reinterpret_cast<int32_t *>(cuq_cpu->data())[0] = 0;
+            reinterpret_cast<int32_t *>(cuq_cpu->data())[1] = static_cast<int32_t>(seq_len);
+            infinicore::Tensor cu_q = cuq_cpu->to(q_var->device());
+            auto cuk_cpu = infinicore::Tensor::empty({2}, infinicore::DataType::I32, infinicore::Device::cpu());
+            reinterpret_cast<int32_t *>(cuk_cpu->data())[0] = 0;
+            reinterpret_cast<int32_t *>(cuk_cpu->data())[1] = static_cast<int32_t>(total_seq_len);
+            infinicore::Tensor cu_k = cuk_cpu->to(q_var->device());
+
+            const bool infllmv2_causal = !use_local_window_;
+            const int window_left = use_local_window_ ? infllmv2_window_left_ : -1;
+            const int window_right = use_local_window_ ? 0 : -1;
+
+            auto out_var = infinicore::op::infllmv2_varlen(
+                q_var, k_var, v_var,
+                cu_q, cu_k,
+                static_cast<int>(seq_len),
+                static_cast<int>(total_seq_len),
+                scaling_,
+                /*causal=*/infllmv2_causal,
+                /*window_size_left=*/window_left,
+                /*window_size_right=*/window_right);
+            attn_output = out_var->view({batch_size, seq_len, num_attention_heads_ * head_dim_});
+        } else if (use_forward_kv) {
+            if (batch_size != 1) {
+                throw std::runtime_error("MiniCPMSALAMinicpm4Attention: kvcache decode requires batch_size=1");
+            }
+            auto q_bshd = q_reshaped->contiguous();
+            auto k_bthd = k_total->permute({0, 2, 1, 3})->contiguous();
+            auto v_bthd = v_total->permute({0, 2, 1, 3})->contiguous();
+
+            const bool infllmv2_causal = !use_local_window_;
+            const int window_left = use_local_window_ ? infllmv2_window_left_ : -1;
+            const int window_right = use_local_window_ ? 0 : -1;
+
+            auto out_bshd = infinicore::op::infllmv2_kvcache(
+                q_bshd,
+                k_bthd,
+                v_bthd,
+                cache_lens,
+                scaling_,
+                /*causal=*/infllmv2_causal,
+                /*window_size_left=*/window_left,
+                /*window_size_right=*/window_right);
+            attn_output = out_bshd->contiguous()->view({batch_size, seq_len, num_attention_heads_ * head_dim_});
+        } else {
+            throw std::runtime_error("MiniCPMSALAMinicpm4Attention: decode requires KV cache");
+        }
+
+        // Sparse gate + o_proj
+        auto gate = o_gate_->forward(hs_mut);
+        infinicore::op::sigmoid_(gate, gate);
+        attn_output = infinicore::op::mul(attn_output, gate);
+        auto out = o_proj_->forward(attn_output);
+        return out;
+    } catch (const std::exception &e) {
+        throw std::runtime_error(
+            std::string("MiniCPMSALAMinicpm4Attention: InfLLM-v2 attention failed. ")
+            + "Original error: " + e.what());
+    }
 }
 
 } // namespace infinilm::models::minicpm_sala

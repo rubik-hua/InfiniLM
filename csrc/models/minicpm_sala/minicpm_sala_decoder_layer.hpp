@@ -23,9 +23,7 @@ public:
     MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                             const infinicore::Device &device,
                             size_t layer_idx,
-                            const std::string &mixer_type,
-                            engine::distributed::RankInfo rank_info = engine::distributed::RankInfo(),
-                            backends::AttentionBackend attention_backend = backends::AttentionBackend::Default);
+                            const std::string &mixer_type);
 
     infinicore::Tensor forward(const infinicore::Tensor &hidden_states,
                                const infinicore::Tensor &position_ids) const;
@@ -38,7 +36,8 @@ private:
 
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);
-    INFINICORE_NN_MODULE(MiniCPMSALAAttention, self_attn);
+    // Registered under the HF-compatible name "self_attn" in ctor.
+    std::shared_ptr<MiniCPMSALAAttentionBase> self_attn_;
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, post_attention_layernorm);
     INFINICORE_NN_MODULE(MiniCPMSALAMLP, mlp);
 };

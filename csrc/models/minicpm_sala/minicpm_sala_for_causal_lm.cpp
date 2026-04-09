@@ -55,15 +55,15 @@ MiniCPMSALAForCausalLM::Output MiniCPMSALAForCausalLM::forward(
     auto block_tables = input.block_tables;
     auto slot_mapping = input.slot_mapping;
 
-    auto hidden_states = model_->forward(
-        input_ids,
-        position_ids,
-        past_sequence_lengths,
-        total_sequence_lengths,
-        input_offsets,
-        cu_seqlens,
-        block_tables,
-        slot_mapping);
+    infinilm::global_state::get_forward_context().attn_metadata =
+        infinilm::global_state::AttentionMetadata(past_sequence_lengths,
+                                                  total_sequence_lengths,
+                                                  input_offsets,
+                                                  cu_seqlens,
+                                                  block_tables,
+                                                  slot_mapping);
+
+    auto hidden_states = model_->forward(input_ids, position_ids);
 
     // MuP lm_head scale baked into lm_head.weight at load time; no forward scaling here.
     auto logits = lm_head_->forward(hidden_states);
