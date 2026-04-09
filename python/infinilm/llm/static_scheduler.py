@@ -115,11 +115,6 @@ class StaticScheduler:
         self.max_cache_len = max_cache_len
         self.cached_block_hashes: List[int] = []
         self.pending_block_hashes: List[int] = []
-        # Safety switch: disable cross-request prefix reuse when investigating
-        # corrupted/contaminated generations.
-        self.disable_prefix_reuse = os.getenv(
-            "INFINILM_STATIC_DISABLE_PREFIX_REUSE", "0"
-        ) in ("1", "true", "True", "yes", "on")
 
     def add_request(self, request: InferenceRequest):
         if request is not None:
@@ -219,8 +214,6 @@ class StaticScheduler:
             num_full_blocks = prompt_len // _BLOCK_SIZE
             matched = 0
 
-            if self.disable_prefix_reuse and self.cached_block_hashes:
-                self.cached_block_hashes.clear()
             self.pending_block_hashes.clear()
 
             for i in range(num_full_blocks):

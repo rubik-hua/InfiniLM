@@ -12,16 +12,14 @@
 namespace infinilm::models::minicpm_sala {
 
 MiniCPMSALAModel::MiniCPMSALAModel(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                                   const infinicore::Device &device,
-                                   engine::distributed::RankInfo rank_info,
-                                   backends::AttentionBackend attention_backend)
-    : model_config_(std::move(model_config)),
-      rank_info_(rank_info),
-      attention_backend_(attention_backend) {
+                                   const infinicore::Device &device)
+    : model_config_(std::move(model_config)) {
 
     // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
     const auto dtype = model_config_->get_dtype();
     compute_device_ = device;
+    const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
+    const backends::AttentionBackend attention_backend = infinilm::global_state::get_infinilm_config().attention_backend;
 
     hidden_size_ = model_config_->get<size_t>("hidden_size");
     dim_model_base_ = model_config_->get_or<double>("dim_model_base", static_cast<double>(hidden_size_));
@@ -50,8 +48,7 @@ MiniCPMSALAModel::MiniCPMSALAModel(std::shared_ptr<infinilm::config::ModelConfig
     layers_.reserve(num_layers);
     for (size_t i = 0; i < num_layers; ++i) {
         layers_.push_back(this->register_module<MiniCPMSALADecoderLayer>(
-            "layers." + std::to_string(i), model_config_, device, i, mixer_types[i], rank_info_, attention_backend_));
-        layers_.back()->set_rotary_emb(rotary_emb_);
+            "layers." + std::to_string(i), model_config_, device, i, mixer_types[i], rank_info, attention_backend));
     }
 }
 
@@ -69,19 +66,19 @@ infinicore::Tensor MiniCPMSALAModel::forward(const infinicore::Tensor &input_ids
                                              std::optional<infinicore::Tensor> cu_seqlens,
                                              std::optional<infinicore::Tensor> block_tables,
                                              std::optional<infinicore::Tensor> slot_mapping) const {
+    infinilm::global_state::get_forward_context().attn_metadata =
+        infinilm::global_state::AttentionMetadata(past_sequence_lengths,
+                                                  total_sequence_lengths,
+                                                  input_offsets,
+                                                  cu_seqlens,
+                                                  block_tables,
+                                                  slot_mapping);
+
     // MuP scaling baked into weights at load time for minicpm_sala; no forward scaling here.
     auto hs = embed_tokens_->forward(input_ids);
 
     for (size_t i = 0; i < layers_.size(); ++i) {
-        hs = layers_[i]->forward(hs,
-                                 position_ids,
-                                 nullptr,
-                                 past_sequence_lengths,
-                                 total_sequence_lengths,
-                                 input_offsets,
-                                 cu_seqlens,
-                                 block_tables,
-                                 slot_mapping);
+        hs = layers_[i]->forward(hs, position_ids);
     }
 
     hs = norm_->forward(hs);

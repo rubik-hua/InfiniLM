@@ -1,6 +1,5 @@
 #include "minicpm_sala_decoder_layer.hpp"
 
-#include "../../global_state/global_state.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/context/context.hpp"
 #include <cmath>
@@ -35,31 +34,10 @@ MiniCPMSALADecoderLayer::MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::confi
     INFINICORE_NN_MODULE_INIT(mlp, model_config, device);
 }
 
-void MiniCPMSALADecoderLayer::set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb) {
-    self_attn_->set_rotary_emb(rotary_emb);
-}
-
 infinicore::Tensor MiniCPMSALADecoderLayer::forward(const infinicore::Tensor &hidden_states,
-                                                    const infinicore::Tensor &position_ids,
-                                                    std::shared_ptr<infinilm::cache::Cache> kv_cache,
-                                                    std::optional<infinicore::Tensor> past_sequence_lengths,
-                                                    std::optional<infinicore::Tensor> total_sequence_lengths,
-                                                    std::optional<infinicore::Tensor> input_offsets,
-                                                    std::optional<infinicore::Tensor> cu_seqlens,
-                                                    std::optional<infinicore::Tensor> block_tables,
-                                                    std::optional<infinicore::Tensor> slot_mapping) const {
-    // Match `layers/attention/Attention`: stash attention metadata in global forward context.
-    infinilm::global_state::get_forward_context().attn_metadata =
-        infinilm::global_state::AttentionMetadata(past_sequence_lengths,
-                                                  total_sequence_lengths,
-                                                  input_offsets,
-                                                  cu_seqlens,
-                                                  block_tables,
-                                                  slot_mapping);
-
+                                                    const infinicore::Tensor &position_ids) const {
     // Pre-norm attention
     auto hs1 = input_layernorm_->forward(hidden_states);
-    (void)kv_cache;
     auto attn_out = self_attn_->forward(position_ids, hs1);
 
     // residual + scale_down * attn_out (MuP)

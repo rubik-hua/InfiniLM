@@ -8,6 +8,7 @@
 #include "../../engine/distributed/distributed.hpp"
 
 #include "../../layers/rotary_embedding/rotary_embedding.hpp"
+#include "../../global_state/global_state.hpp"
 #include "infinicore/nn/embedding.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
@@ -23,9 +24,7 @@ namespace infinilm::models::minicpm_sala {
 class MiniCPMSALAModel : public infinicore::nn::Module {
 public:
     MiniCPMSALAModel(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                     const infinicore::Device &device,
-                     engine::distributed::RankInfo rank_info = engine::distributed::RankInfo(),
-                     backends::AttentionBackend attention_backend = backends::AttentionBackend::Default);
+                     const infinicore::Device &device);
 
     infinicore::Tensor forward(const infinicore::Tensor &input_ids,
                                const infinicore::Tensor &position_ids,
@@ -49,8 +48,6 @@ protected:
 private:
     std::shared_ptr<infinilm::config::ModelConfig> model_config_;
     std::shared_ptr<infinicore::nn::RoPE> rotary_emb_;
-    engine::distributed::RankInfo rank_info_;
-    backends::AttentionBackend attention_backend_;
     infinicore::Device compute_device_;
 
     size_t hidden_size_;

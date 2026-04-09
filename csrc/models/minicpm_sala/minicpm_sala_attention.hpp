@@ -4,6 +4,7 @@
 #include "../../cache/kv_cache.hpp"
 #include "../../config/model_config.hpp"
 #include "../../engine/distributed/distributed.hpp"
+#include "../../layers/rotary_embedding/rotary_embedding.hpp"
 
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/nn/module.hpp"
@@ -35,7 +36,6 @@ public:
     infinicore::Tensor forward(const infinicore::Tensor &position_ids,
                                const infinicore::Tensor &hidden_states) const;
 
-    void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb);
     void reset_state();
 
 protected:

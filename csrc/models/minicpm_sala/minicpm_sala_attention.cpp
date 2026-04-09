@@ -138,6 +138,7 @@ MiniCPMSALAAttention::MiniCPMSALAAttention(std::shared_ptr<infinilm::config::Mod
     // HyPE: RoPE in lightning layers, NoPE in sparse (minicpm4) layers.
     // We treat all non-minicpm4 as "linear" (lightning-attn) for M1 dense fallback.
     use_rope_ = (mixer_type != "minicpm4") && model_config_->get_or<bool>("lightning_use_rope", true);
+    rotary_emb_ = infinilm::layers::rotary_embedding::get_rope(model_config_, device);
 
     // MiniCPM-SALA uses QK-norm and output gates by default.
     use_qk_norm_ = model_config_->get_or<bool>("qk_norm", true) && (mixer_type != "minicpm4");
@@ -171,10 +172,6 @@ MiniCPMSALAAttention::MiniCPMSALAAttention(std::shared_ptr<infinilm::config::Mod
     for (size_t h = 0; h < num_attention_heads_; ++h)
         ptr[h] = -slopes[h];
     g_gamma_ = g_cpu->to(device);
-}
-
-void MiniCPMSALAAttention::set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb) {
-    rotary_emb_ = rotary_emb;
 }
 
 void MiniCPMSALAAttention::reset_state() {

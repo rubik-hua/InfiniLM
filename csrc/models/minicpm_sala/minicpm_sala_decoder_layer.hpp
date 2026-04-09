@@ -4,7 +4,6 @@
 #include "minicpm_sala_mlp.hpp"
 
 #include "../../backends/attention_backends.hpp"
-#include "../../cache/kv_cache.hpp"
 #include "../../config/model_config.hpp"
 #include "../../engine/distributed/distributed.hpp"
 
@@ -29,16 +28,7 @@ public:
                             backends::AttentionBackend attention_backend = backends::AttentionBackend::Default);
 
     infinicore::Tensor forward(const infinicore::Tensor &hidden_states,
-                               const infinicore::Tensor &position_ids,
-                               std::shared_ptr<infinilm::cache::Cache> kv_cache,
-                               std::optional<infinicore::Tensor> past_sequence_lengths,
-                               std::optional<infinicore::Tensor> total_sequence_lengths,
-                               std::optional<infinicore::Tensor> input_offsets,
-                               std::optional<infinicore::Tensor> cu_seqlens,
-                               std::optional<infinicore::Tensor> block_tables,
-                               std::optional<infinicore::Tensor> slot_mapping) const;
-
-    void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb);
+                               const infinicore::Tensor &position_ids) const;
 
 private:
     friend class MiniCPMSALAModel;

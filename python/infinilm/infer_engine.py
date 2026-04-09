@@ -164,19 +164,9 @@ class InferEngine(_infinilm.InferEngine):
                 dtype=infinicore.int32,
             )
 
-        # Decode metadata fast path (batch=1, static cache):
-        # avoid per-step from_list()/numpy allocations for tiny scalar tensors.
-        # Those tensors live on CPU and are H2D-copied each forward; for profiling
-        # comparisons vs `from_list` device metadata, set:
-        #   INFINI_PROFILE_DISABLE_FAST_DECODE_META=1
-        disable_fast_decode_meta = os.environ.get(
-            "INFINI_PROFILE_DISABLE_FAST_DECODE_META", "0"
-        ) not in ("", "0", "false", "False")
-        fast_decode_meta = (
-            (not self.enable_paged_attn)
-            and (initial_batch_size == 1)
-            and not disable_fast_decode_meta
-        )
+        # Decode metadata fast path (batch=1, static cache): avoid per-step from_list() allocations
+        # for tiny scalar tensors (these live on CPU and are H2D-copied each forward).
+        fast_decode_meta = (not self.enable_paged_attn) and (initial_batch_size == 1)
         if fast_decode_meta:
             cpu = infinicore.device("cpu", 0)
 

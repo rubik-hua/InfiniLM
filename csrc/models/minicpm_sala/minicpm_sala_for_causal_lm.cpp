@@ -33,7 +33,9 @@ MiniCPMSALAForCausalLM::MiniCPMSALAForCausalLM(
 
     // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
     const auto dtype = model_config->get_dtype();
-    INFINICORE_NN_MODULE_INIT(model, model_config, device, rank_info, attention_backend);
+    (void)rank_info;
+    (void)attention_backend;
+    INFINICORE_NN_MODULE_INIT(model, model_config, device);
 
     const size_t hidden_size = model_config->get<size_t>("hidden_size");
     const size_t vocab_size = model_config->get<size_t>("vocab_size");
