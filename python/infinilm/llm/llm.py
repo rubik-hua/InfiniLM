@@ -371,7 +371,6 @@ class LLMEngine:
             conversation=messages,
             add_generation_prompt=add_generation_prompt,
             tokenize=False,
-            continue_final_message=not add_generation_prompt,
             **chat_template_kwargs,
         )
 

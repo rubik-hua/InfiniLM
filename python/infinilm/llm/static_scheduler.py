@@ -4,7 +4,6 @@ Static Scheduler - Single-batch request scheduling for Static KV Cache.
 
 import logging
 import queue
-import os
 import janus
 from typing import List, Optional
 

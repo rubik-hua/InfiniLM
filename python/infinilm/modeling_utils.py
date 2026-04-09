@@ -155,32 +155,26 @@ def load_model_state_dict_by_file(
     torch_dtype = infinicore.utils.to_torch_dtype(dtype)
     model_keys = model.state_dict_keyname()
 
-    # MiniCPM-style scaling (used by MiniCPM / FM9G; also applies to MiniCPM-SALA checkpoints).
-    # This matches `InfiniLM/scripts/jiuge.py` weight scaling behavior.
+    # MiniCPM-SALA scaling (bake selected MuP scales into weights).
+    # This matches `InfiniLM/scripts/jiuge.py` weight scaling behavior for `model_type=="minicpm_sala"`.
     scale_input = 1.0
     scale_output = 1.0
     scale_o = 1.0
     scale_down = 1.0
     scale_lm_head = 1.0
     try:
+        # TODO: fetch config from model rather than file directly
         with open(os.path.join(model_path, "config.json")) as f:
             cfg = json.load(f)
-        if (
-            cfg.get("model_type") in ["fm9g", "minicpm", "minicpm_sala"]
-            and "scale_emb" in cfg
-            and "scale_depth" in cfg
-        ):
+        if cfg.get("model_type") == "minicpm_sala" and "scale_emb" in cfg and "scale_depth" in cfg:
             scale_input = float(cfg["scale_emb"])
             scale_o = float(cfg["scale_depth"]) / math.sqrt(float(cfg["num_hidden_layers"]))
             scale_down = float(cfg["scale_depth"]) / math.sqrt(float(cfg["num_hidden_layers"]))
-            if cfg.get("model_type") in ["fm9g", "minicpm"] and "dim_model_base" in cfg:
-                scale_output = float(int(cfg["hidden_size"]) // int(cfg["dim_model_base"]))
-            if cfg.get("model_type") == "minicpm_sala" and "dim_model_base" in cfg and "hidden_size" in cfg:
+            if "dim_model_base" in cfg and "hidden_size" in cfg:
                 scale_lm_head = float(cfg["dim_model_base"]) / float(cfg["hidden_size"])
             # minicpm_sala: only bake embed and lm_head; residual scaling done at forward in C++
-            if cfg.get("model_type") == "minicpm_sala":
-                scale_o = 1.0
-                scale_down = 1.0
+            scale_o = 1.0
+            scale_down = 1.0
     except Exception:
         pass
 
