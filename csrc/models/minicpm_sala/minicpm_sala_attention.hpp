@@ -30,26 +30,13 @@ public:
                          engine::distributed::RankInfo rank_info = engine::distributed::RankInfo(),
                          backends::AttentionBackend attention_backend = backends::AttentionBackend::Default);
 
-    infinicore::Tensor forward(const infinicore::Tensor &hidden_states,
-                               const infinicore::Tensor &position_ids,
-                               std::shared_ptr<infinilm::cache::Cache> kv_cache,
-                               std::optional<infinicore::Tensor> past_sequence_lengths,
-                               std::optional<infinicore::Tensor> total_sequence_lengths,
-                               std::optional<infinicore::Tensor> input_offsets,
-                               std::optional<infinicore::Tensor> cu_seqlens,
-                               std::optional<infinicore::Tensor> block_tables,
-                               std::optional<infinicore::Tensor> slot_mapping) const;
+    // Match `infinilm::layers::attention::Attention` API: metadata is pulled from
+    // `global_state::get_forward_context().attn_metadata`.
+    infinicore::Tensor forward(const infinicore::Tensor &position_ids,
+                               const infinicore::Tensor &hidden_states) const;
 
     void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb);
-    void reset_cache();
-
-private:
-    infinicore::Tensor forward_dense_(const infinicore::Tensor &hidden_states,
-                                     const infinicore::Tensor &position_ids,
-                                     std::shared_ptr<infinilm::cache::Cache> kv_cache,
-                                     std::optional<infinicore::Tensor> past_sequence_lengths,
-                                     std::optional<infinicore::Tensor> total_sequence_lengths,
-                                     std::optional<infinicore::Tensor> cu_seqlens) const;
+    void reset_state();
 
 protected:
     // Projections (HF-aligned naming)
@@ -72,9 +59,6 @@ protected:
     engine::distributed::RankInfo rank_info_;
 
     size_t layer_idx_;
-    // Layer index remapped into the cache instance (minicpm4-cache vs lightning-cache).
-    // StaticKVCache allocates a compact [num_layers, ...] slab per cache type.
-    size_t cache_layer_idx_ = 0;
     size_t hidden_size_;
     size_t num_attention_heads_;
     size_t num_key_value_heads_;

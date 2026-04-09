@@ -1,5 +1,6 @@
 #include "minicpm_sala_decoder_layer.hpp"
 
+#include "../../global_state/global_state.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/context/context.hpp"
 #include <cmath>
@@ -38,10 +39,6 @@ void MiniCPMSALADecoderLayer::set_rotary_emb(const std::shared_ptr<infinicore::n
     self_attn_->set_rotary_emb(rotary_emb);
 }
 
-void MiniCPMSALADecoderLayer::reset_cache() {
-    self_attn_->reset_cache();
-}
-
 infinicore::Tensor MiniCPMSALADecoderLayer::forward(const infinicore::Tensor &hidden_states,
                                                     const infinicore::Tensor &position_ids,
                                                     std::shared_ptr<infinilm::cache::Cache> kv_cache,
@@ -51,18 +48,19 @@ infinicore::Tensor MiniCPMSALADecoderLayer::forward(const infinicore::Tensor &hi
                                                     std::optional<infinicore::Tensor> cu_seqlens,
                                                     std::optional<infinicore::Tensor> block_tables,
                                                     std::optional<infinicore::Tensor> slot_mapping) const {
+    // Match `layers/attention/Attention`: stash attention metadata in global forward context.
+    infinilm::global_state::get_forward_context().attn_metadata =
+        infinilm::global_state::AttentionMetadata(past_sequence_lengths,
+                                                  total_sequence_lengths,
+                                                  input_offsets,
+                                                  cu_seqlens,
+                                                  block_tables,
+                                                  slot_mapping);
+
     // Pre-norm attention
     auto hs1 = input_layernorm_->forward(hidden_states);
-    auto attn_out = self_attn_->forward(
-        hs1,
-        position_ids,
-        kv_cache,
-        past_sequence_lengths,
-        total_sequence_lengths,
-        input_offsets,
-        cu_seqlens,
-        block_tables,
-        slot_mapping);
+    (void)kv_cache;
+    auto attn_out = self_attn_->forward(position_ids, hs1);
 
     // residual + scale_down * attn_out (MuP)
     auto ones_attn = infinicore::Tensor::empty(attn_out->shape(), attn_out->dtype(), attn_out->device());

@@ -6,9 +6,9 @@
 #include "../../config/model_config.hpp"
 #include "../../engine/distributed/distributed.hpp"
 #include "../../backends/attention_backends.hpp"
+#include "../../layers/linear/linear.hpp"
 
 #include "infinicore/device.hpp"
-#include "infinicore/nn/linear.hpp"
 
 namespace infinilm::models::minicpm_sala {
 
@@ -26,12 +26,9 @@ public:
 
     void reset_cache(const cache::CacheConfig *cache_config) override;
 
-    const cache::CacheConfig *get_cache_config() const override;
-
 private:
     INFINICORE_NN_MODULE(MiniCPMSALAModel, model);
-    INFINICORE_NN_MODULE(infinicore::nn::Linear, lm_head);
-    std::unique_ptr<cache::CacheConfig> cache_config_;
+    INFINICORE_NN_MODULE(infinilm::layers::linear::ReplicatedLinear, lm_head);
 };
 
 } // namespace infinilm::models::minicpm_sala
@@ -42,4 +39,3 @@ std::shared_ptr<infinilm::config::ModelConfig> create_minicpm_sala_model_config(
     std::shared_ptr<infinilm::config::ModelConfig> model_config);
 
 } // namespace infinilm::models::minicpm_sala
-

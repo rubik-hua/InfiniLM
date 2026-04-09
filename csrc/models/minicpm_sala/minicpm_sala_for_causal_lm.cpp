@@ -1,12 +1,18 @@
 #include "minicpm_sala_for_causal_lm.hpp"
 #include "../models_registry.hpp"
 
+#include "../../global_state/global_state.hpp"
 #include "infinicore/ops.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <string>
 
 namespace infinilm::models::minicpm_sala {
+
+std::vector<infinicore::Tensor> minicpm_sala_allocate_kv_cache_tensors(
+    const cache::CacheConfig *cache_config,
+    const std::shared_ptr<infinilm::config::ModelConfig> &text_config,
+    const backends::AttentionBackend &attention_backend);
 
 std::shared_ptr<infinilm::config::ModelConfig> create_minicpm_sala_model_config(
     std::shared_ptr<infinilm::config::ModelConfig> model_config) {
@@ -23,6 +29,7 @@ MiniCPMSALAForCausalLM::MiniCPMSALAForCausalLM(
     engine::distributed::RankInfo rank_info,
     backends::AttentionBackend attention_backend) {
     device_ = device;
+    model_config_ = model_config;
 
     // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
     const auto dtype = model_config->get_dtype();
@@ -62,12 +69,23 @@ MiniCPMSALAForCausalLM::Output MiniCPMSALAForCausalLM::forward(
 }
 
 void MiniCPMSALAForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
+    // Match `InfinilmModel::reset_cache`: own `cache_config_` + `kv_cache_vec` here; inner model only
+    // resets per-layer attention state. MiniCPM uses `minicpm_sala_allocate_kv_cache_tensors` instead of
+    // `default_allocate_kv_cache_tensors`.
+    if (cache_config == nullptr) {
+        cache_config_.reset();
+        infinilm::global_state::get_forward_context().kv_cache_vec.clear();
+        model_->reset_state();
+        return;
+    }
     cache_config_ = cache_config->unique_copy();
-    model_->reset_cache(cache_config_.get());
-}
-
-const cache::CacheConfig *MiniCPMSALAForCausalLM::get_cache_config() const {
-    return cache_config_.get();
+    auto &kv_cache_vec = infinilm::global_state::get_forward_context().kv_cache_vec;
+    kv_cache_vec.clear();
+    const backends::AttentionBackend attention_backend =
+        infinilm::global_state::get_infinilm_config().attention_backend;
+    kv_cache_vec = std::move(
+        minicpm_sala_allocate_kv_cache_tensors(cache_config, model_config_, attention_backend));
+    model_->reset_state();
 }
 
 } // namespace infinilm::models::minicpm_sala

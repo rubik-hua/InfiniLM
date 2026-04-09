@@ -7,6 +7,7 @@
 #include "infinicore/ops/simple_gla_prefill.hpp"
 #include "infinicore/ops/simple_gla_recurrent_state_append.hpp"
 #include "infinicore/context/context.hpp"
+#include "../../global_state/global_state.hpp"
 #include "../debug_utils/tensor_utils.hpp"
 
 #include <cmath>
@@ -18,6 +19,35 @@
 namespace infinilm::models::minicpm_sala {
 
 namespace {
+
+// Per-layer KV tensor layout from `StaticKVCache::create_layer_kv_cache`: [2, B, n_kv, max_len, D].
+void minicpm_sala_update_layer_kv_tensor(infinicore::Tensor &kv_bundle,
+                                         const infinicore::Tensor &k_permuted,
+                                         const infinicore::Tensor &v_permuted,
+                                         const infinicore::Tensor &past_sequence_lengths) {
+    auto k_cache_layer = kv_bundle->narrow({{0, 0, 1}})->squeeze(0);
+    auto v_cache_layer = kv_bundle->narrow({{0, 1, 1}})->squeeze(0);
+
+#ifdef ENABLE_KV_CACHING
+    infinicore::op::kv_caching_(
+        k_cache_layer,
+        v_cache_layer,
+        k_permuted,
+        v_permuted,
+        past_sequence_lengths);
+#else
+    const size_t cache_pos = static_cast<size_t>(
+        reinterpret_cast<int32_t *>(past_sequence_lengths->to(infinicore::Device::cpu())->data())[0]);
+    const size_t update_len = k_permuted->size(2);
+    const size_t result_len = cache_pos + update_len;
+    if (result_len > k_cache_layer->size(2)) {
+        throw std::runtime_error("MiniCPMSALAAttention: KV cache length exceeded");
+    }
+    k_cache_layer->narrow({{2, cache_pos, update_len}})->copy_from(k_permuted);
+    v_cache_layer->narrow({{2, cache_pos, update_len}})->copy_from(v_permuted);
+#endif
+}
+
 // Same as HF MiniCPM-SALA _build_slope_tensor (used for Simple GLA decay).
 std::vector<float> build_slope_tensor(size_t n) {
     auto get_slopes_power_of_2 = [](size_t n) -> std::vector<float> {
@@ -105,35 +135,6 @@ MiniCPMSALAAttention::MiniCPMSALAAttention(std::shared_ptr<infinilm::config::Mod
     }
     scaling_ = static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
 
-    // StaticKVCache is allocated as a compact slab per cache type:
-    //  - minicpm4-cache stores only layers where mixer_types[i] == "minicpm4"
-    //  - lightning-cache stores only layers where mixer_types[i] != "minicpm4"
-    //
-    // Compute this attention instance's local cache index (0-based) from its
-    // absolute layer_idx_.
-    {
-        bool this_is_minicpm4_cache = (mixer_type == "minicpm4");
-        std::vector<std::string> mixer_types;
-        try {
-            mixer_types = model_config_->get<std::vector<std::string>>("mixer_types");
-        } catch (...) {
-            mixer_types.assign(model_config_->get<size_t>("num_hidden_layers"), "minicpm4");
-        }
-        // Be defensive if mixer_types size mismatches.
-        if (mixer_types.size() != model_config_->get<size_t>("num_hidden_layers")) {
-            mixer_types.resize(model_config_->get<size_t>("num_hidden_layers"), "minicpm4");
-        }
-        size_t count = 0;
-        for (size_t i = 0; i <= layer_idx_ && i < mixer_types.size(); ++i) {
-            const bool is_minicpm4_layer = (mixer_types[i] == "minicpm4");
-            if (is_minicpm4_layer == this_is_minicpm4_cache) {
-                ++count;
-            }
-        }
-        // layer_idx_ is always a valid layer, so count should be >= 1.
-        cache_layer_idx_ = count > 0 ? (count - 1) : 0;
-    }
-
     // HyPE: RoPE in lightning layers, NoPE in sparse (minicpm4) layers.
     // We treat all non-minicpm4 as "linear" (lightning-attn) for M1 dense fallback.
     use_rope_ = (mixer_type != "minicpm4") && model_config_->get_or<bool>("lightning_use_rope", true);
@@ -176,7 +177,7 @@ void MiniCPMSALAAttention::set_rotary_emb(const std::shared_ptr<infinicore::nn::
     rotary_emb_ = rotary_emb;
 }
 
-void MiniCPMSALAAttention::reset_cache() {
+void MiniCPMSALAAttention::reset_state() {
     // KV tensors are maintained by the shared engine cache (StaticKVCache).
     // Lightning decode recurrent state is maintained locally for performance.
     gla_state_valid_ = false;
@@ -185,27 +186,14 @@ void MiniCPMSALAAttention::reset_cache() {
 }
 
 
-infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &hidden_states,
-                                                 const infinicore::Tensor &position_ids,
-                                                 std::shared_ptr<infinilm::cache::Cache> kv_cache,
-                                                 std::optional<infinicore::Tensor> past_sequence_lengths,
-                                                 std::optional<infinicore::Tensor> total_sequence_lengths,
-                                                 std::optional<infinicore::Tensor> input_offsets,
-                                                 std::optional<infinicore::Tensor> cu_seqlens,
-                                                 std::optional<infinicore::Tensor> block_tables,
-                                                 std::optional<infinicore::Tensor> slot_mapping) const {
-    (void)input_offsets;
-    (void)block_tables;
-    (void)slot_mapping;
-    return forward_dense_(hidden_states, position_ids, kv_cache, past_sequence_lengths, total_sequence_lengths, cu_seqlens);
-}
-
-infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor &hidden_states,
-                                                       const infinicore::Tensor &position_ids,
-                                                       std::shared_ptr<infinilm::cache::Cache> kv_cache,
-                                                       std::optional<infinicore::Tensor> past_sequence_lengths,
-                                                       std::optional<infinicore::Tensor> total_sequence_lengths,
-                                                       std::optional<infinicore::Tensor> cu_seqlens) const {
+infinicore::Tensor MiniCPMSALAAttention::forward(const infinicore::Tensor &position_ids,
+                                                const infinicore::Tensor &hidden_states) const {
+    const auto &attn_meta = infinilm::global_state::get_forward_context().attn_metadata;
+    auto past_sequence_lengths = attn_meta.past_sequence_lengths;
+    auto total_sequence_lengths = attn_meta.total_sequence_lengths;
+    auto cu_seqlens = attn_meta.cu_seqlens;
+    // input_offsets/block_tables/slot_mapping are not used in this dense/per-layer-kv implementation yet.
+    (void)cu_seqlens;
     // Input: [B, S, H]
     auto shape = hidden_states->shape();
     const size_t batch_size = shape[0];
@@ -277,22 +265,28 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
     auto k_permuted = k_reshaped->permute({0, 2, 1, 3})->contiguous(); // [B, n_kv, S, D]
     auto v_permuted = v_reshaped->permute({0, 2, 1, 3})->contiguous(); // [B, n_kv, S, D]
 
-    // HF-like dense KV caching using the engine-provided StaticKVCache.
+    // Per-layer KV tensors in `global_state::get_forward_context().kv_cache_vec` (same pattern as
+    // `InfinilmModel::reset_cache` / `StaticAttentionImpl`).
     infinicore::Tensor k_total = k_permuted;
     infinicore::Tensor v_total = v_permuted;
-    std::shared_ptr<cache::StaticKVCache> static_kv_cache = nullptr;
-    if (kv_cache != nullptr && has_cache_meta) {
-        static_kv_cache = std::dynamic_pointer_cast<cache::StaticKVCache>(kv_cache);
-        if (!static_kv_cache) {
-            throw std::runtime_error("MiniCPMSALAAttention: Unsupported cache type (expected StaticKVCache)");
+    bool use_forward_kv = false;
+    if (has_cache_meta) {
+        auto &kv_vec = infinilm::global_state::get_forward_context().kv_cache_vec;
+        if (layer_idx_ >= kv_vec.size()) {
+            throw std::runtime_error(
+                "MiniCPMSALAAttention: forward_context.kv_cache_vec is unset or too small (call reset_cache / align layer count)");
         }
-        // Default behavior: update cache here. For minicpm4 decode we may override and let InfLLM-v2 update.
-        auto [k_cached, v_cached] = static_kv_cache->update(
-            cache_layer_idx_, k_permuted, v_permuted, past_sequence_lengths.value());
-        k_total = k_cached;
-        v_total = v_cached;
+        use_forward_kv = true;
+        minicpm_sala_update_layer_kv_tensor(
+            kv_vec[layer_idx_],
+            k_permuted,
+            v_permuted,
+            past_sequence_lengths.value());
+        auto k_cache_layer = kv_vec[layer_idx_]->narrow({{0, 0, 1}})->squeeze(0);
+        auto v_cache_layer = kv_vec[layer_idx_]->narrow({{0, 1, 1}})->squeeze(0);
+        k_total = k_cache_layer;
+        v_total = v_cache_layer;
     } else {
-        // No cache metadata => treat as prefill-only.
         total_seq_len = seq_len;
     }
 
@@ -339,7 +333,7 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
 
         // Lightning fast decode: maintain recurrent state locally (do NOT depend on StaticKVCache extensions).
         // We rebuild state on-demand if it is out-of-sync with cache_pos.
-        const bool is_decode = has_cache_meta && static_kv_cache && (seq_len == 1) && (total_seq_len > 1);
+        const bool is_decode = has_cache_meta && use_forward_kv && (seq_len == 1) && (total_seq_len > 1);
         if (is_decode) {
             ensure_gla_state_allocated(gla_state_, q_bthd->device(), batch_size, n_h, head_dim_);
 
@@ -416,13 +410,12 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
                     "MiniCPMSALAAttention(minicpm4): total_sequence_lengths is required for InfLLM-v2 path");
             }
             // `infllmv2_kvcache` expects the number of valid K/V entries in the
-            // provided cache tensors. Since we already appended the current
-            // token via StaticKVCache::update, the valid length is the total
-            // KV length (past + current token).
+            // provided cache tensors. After per-layer KV update, valid length is
+            // total KV length (past + current token).
             const auto cache_lens = total_sequence_lengths.value();
 
             // Prefill: InfLLM-v2 varlen (Q and K packed lengths match `seq_len == total_seq_len` here).
-            // Decode: `seq_len < total_seq_len` — use `infllmv2_kvcache` after StaticKVCache::update
+            // Decode: `seq_len < total_seq_len` — use `infllmv2_kvcache` after KV tensor update
             // (valid KV length == `total_seq_len`). Using varlen for decode (1 query vs long K) hit NaNs
             // in practice for modest sequence lengths; kvcache matches operator tests and Flash path.
             const bool force_varlen_decode = [&]() {
@@ -465,7 +458,7 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
                     /*window_size_left=*/window_left,
                     /*window_size_right=*/window_right);
                 attn_output = out_var->view({batch_size, seq_len, num_attention_heads_ * head_dim_});
-            } else if (static_kv_cache) {
+            } else if (use_forward_kv) {
                 if (batch_size != 1) {
                     throw std::runtime_error("MiniCPMSALAAttention(minicpm4): kvcache decode path currently requires batch_size=1");
                 }
@@ -490,7 +483,7 @@ infinicore::Tensor MiniCPMSALAAttention::forward_dense_(const infinicore::Tensor
                     {batch_size, seq_len, num_attention_heads_ * head_dim_});
             } else {
                 throw std::runtime_error(
-                    "MiniCPMSALAAttention(minicpm4): decode requires StaticKVCache (missing cache metadata or cache)");
+                    "MiniCPMSALAAttention(minicpm4): decode requires KV cache (missing cache metadata or kv_cache_vec)");
             }
         } catch (const std::exception &e) {
             throw std::runtime_error(

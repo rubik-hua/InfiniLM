@@ -17,6 +17,8 @@
 
 namespace infinilm::models::minicpm_sala {
 
+class MiniCPMSALAModel;
+
 class MiniCPMSALADecoderLayer : public infinicore::nn::Module {
 public:
     MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -37,9 +39,10 @@ public:
                                std::optional<infinicore::Tensor> slot_mapping) const;
 
     void set_rotary_emb(const std::shared_ptr<infinicore::nn::RoPE> &rotary_emb);
-    void reset_cache();
 
 private:
+    friend class MiniCPMSALAModel;
+
     double residual_scale_ = 1.0;
     size_t layer_idx_ = 0;
 
