@@ -8,12 +8,12 @@ MiniCPMSALAMLP::MiniCPMSALAMLP(std::shared_ptr<infinilm::config::ModelConfig> mo
                                const infinicore::Device &device) {
     // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
     const auto dtype = model_config->get_dtype();
-    hidden_size_ = model_config->get<size_t>("hidden_size");
-    intermediate_size_ = model_config->get<size_t>("intermediate_size");
+    const size_t hidden_size = model_config->get<size_t>("hidden_size");
+    const size_t intermediate_size = model_config->get<size_t>("intermediate_size");
 
-    INFINICORE_NN_MODULE_INIT(gate_proj, hidden_size_, intermediate_size_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(up_proj, hidden_size_, intermediate_size_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(down_proj, intermediate_size_, hidden_size_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(gate_proj, hidden_size, intermediate_size, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(up_proj, hidden_size, intermediate_size, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(down_proj, intermediate_size, hidden_size, false, dtype, device);
 }
 
 infinicore::Tensor MiniCPMSALAMLP::forward(const infinicore::Tensor &x) const {

@@ -4,8 +4,6 @@
 #include "minicpm_sala_model.hpp"
 
 #include "../../config/model_config.hpp"
-#include "../../engine/distributed/distributed.hpp"
-#include "../../backends/attention_backends.hpp"
 #include "../../layers/linear/linear.hpp"
 
 #include "infinicore/device.hpp"
@@ -18,9 +16,7 @@ namespace infinilm::models::minicpm_sala {
 class MiniCPMSALAForCausalLM : public InfinilmModel {
 public:
     MiniCPMSALAForCausalLM(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-                           const infinicore::Device &device,
-                           engine::distributed::RankInfo rank_info = engine::distributed::RankInfo(),
-                           backends::AttentionBackend attention_backend = backends::AttentionBackend::Default);
+                           const infinicore::Device &device);
 
     Output forward(const Input &input) const override;
 

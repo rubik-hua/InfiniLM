@@ -93,35 +93,33 @@ void ensure_gla_state_allocated(infinicore::Tensor &state,
 MiniCPMSALALightningAttention::MiniCPMSALALightningAttention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                                              const infinicore::Device &device,
                                                              size_t layer_idx)
-    : model_config_(std::move(model_config)),
-      layer_idx_(layer_idx) {
-    const auto dtype = model_config_->get_dtype();
-    attention_backend_ = infinilm::global_state::get_infinilm_config().attention_backend;
-    hidden_size_ = model_config_->get<size_t>("hidden_size");
+    : layer_idx_(layer_idx) {
+    const auto dtype = model_config->get_dtype();
+    const size_t hidden_size = model_config->get<size_t>("hidden_size");
 
-    num_attention_heads_ = model_config_->get_or<size_t>("lightning_nh", model_config_->get<size_t>("num_attention_heads"));
-    num_key_value_heads_ = model_config_->get_or<size_t>("lightning_nkv", model_config_->get<size_t>("num_key_value_heads"));
-    head_dim_ = model_config_->get_or<size_t>("lightning_head_dim", model_config_->get<size_t>("head_dim"));
+    num_attention_heads_ = model_config->get_or<size_t>("lightning_nh", model_config->get<size_t>("num_attention_heads"));
+    num_key_value_heads_ = model_config->get_or<size_t>("lightning_nkv", model_config->get<size_t>("num_key_value_heads"));
+    head_dim_ = model_config->get_or<size_t>("lightning_head_dim", model_config->get<size_t>("head_dim"));
     scaling_ = static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
 
-    use_rope_ = model_config_->get_or<bool>("lightning_use_rope", true);
-    rotary_emb_ = infinilm::layers::rotary_embedding::get_rope(model_config_, device);
+    use_rope_ = model_config->get_or<bool>("lightning_use_rope", true);
+    rotary_emb_ = infinilm::layers::rotary_embedding::get_rope(model_config, device);
 
-    use_qk_norm_ = model_config_->get_or<bool>("qk_norm", true);
-    use_output_gate_ = model_config_->get_or<bool>("use_output_gate", true);
+    use_qk_norm_ = model_config->get_or<bool>("qk_norm", true);
+    use_output_gate_ = model_config->get_or<bool>("use_output_gate", true);
 
-    INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, num_attention_heads_ * head_dim_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(q_proj, hidden_size, num_attention_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(k_proj, hidden_size, num_key_value_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(v_proj, hidden_size, num_key_value_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size, false, dtype, device);
 
     if (use_qk_norm_) {
-        INFINICORE_NN_MODULE_INIT(q_norm, head_dim_, model_config_->get<double>("rms_norm_eps"), dtype, device);
-        INFINICORE_NN_MODULE_INIT(k_norm, head_dim_, model_config_->get<double>("rms_norm_eps"), dtype, device);
+        INFINICORE_NN_MODULE_INIT(q_norm, head_dim_, model_config->get<double>("rms_norm_eps"), dtype, device);
+        INFINICORE_NN_MODULE_INIT(k_norm, head_dim_, model_config->get<double>("rms_norm_eps"), dtype, device);
     }
     use_output_norm_ = true;
-    INFINICORE_NN_MODULE_INIT(o_norm, hidden_size_, model_config_->get<double>("rms_norm_eps"), dtype, device);
-    INFINICORE_NN_MODULE_INIT(z_proj, hidden_size_, hidden_size_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(o_norm, hidden_size, model_config->get<double>("rms_norm_eps"), dtype, device);
+    INFINICORE_NN_MODULE_INIT(z_proj, hidden_size, hidden_size, false, dtype, device);
 
     std::vector<float> slopes = build_slope_tensor(num_attention_heads_);
     auto g_cpu = infinicore::Tensor::empty(
@@ -196,15 +194,9 @@ infinicore::Tensor MiniCPMSALALightningAttention::forward(const infinicore::Tens
     size_t cache_pos = 0;
     const bool has_cache_meta = past_sequence_lengths.has_value() && total_sequence_lengths.has_value();
     if (has_cache_meta) {
-        // Single device-to-host sync: read both scalars (engine could pass these as scalars later).
         auto past_cpu = past_sequence_lengths.value()->to(infinicore::Device::cpu());
-        auto total_cpu = total_sequence_lengths.value()->to(infinicore::Device::cpu());
         cache_pos = reinterpret_cast<int32_t *>(past_cpu->data())[0];
-        size_t total_seq_len_raw = reinterpret_cast<int32_t *>(total_cpu->data())[0];
-        total_seq_len = total_seq_len_raw;
-        // Some engine call sites pass `total_sequence_lengths` as the *input* length (e.g. 1 for decode),
-        // while `past_sequence_lengths` is the cached KV length. Attention needs total KV length.
-        // Use KV semantics: total_kv_len = cache_pos + current seq_len.
+        // `total_sequence_lengths` may be input length (e.g. 1 on decode); KV length is cache_pos + seq_len.
         total_seq_len = cache_pos + seq_len;
     } else if (total_sequence_lengths.has_value()) {
         total_seq_len = reinterpret_cast<int32_t *>(total_sequence_lengths.value()->to(infinicore::Device::cpu())->data())[0];
@@ -377,37 +369,34 @@ infinicore::Tensor MiniCPMSALALightningAttention::forward(const infinicore::Tens
 MiniCPMSALAMinicpm4Attention::MiniCPMSALAMinicpm4Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                                            const infinicore::Device &device,
                                                            size_t layer_idx)
-    : model_config_(std::move(model_config)),
-      layer_idx_(layer_idx) {
+    : layer_idx_(layer_idx) {
     (void)device;
-    const auto dtype = model_config_->get_dtype();
-    attention_backend_ = infinilm::global_state::get_infinilm_config().attention_backend;
-    hidden_size_ = model_config_->get<size_t>("hidden_size");
-    num_attention_heads_ = model_config_->get<size_t>("num_attention_heads");
-    num_key_value_heads_ = model_config_->get<size_t>("num_key_value_heads");
-    head_dim_ = model_config_->get<size_t>("head_dim");
+    const auto dtype = model_config->get_dtype();
+    const size_t hidden_size = model_config->get<size_t>("hidden_size");
+    num_attention_heads_ = model_config->get<size_t>("num_attention_heads");
+    num_key_value_heads_ = model_config->get<size_t>("num_key_value_heads");
+    head_dim_ = model_config->get<size_t>("head_dim");
     scaling_ = static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
 
-    int sparse_window_size = model_config_->get_or<int>("sparse_window_size", -1);
+    int sparse_window_size = model_config->get_or<int>("sparse_window_size", -1);
     if (sparse_window_size <= 0) {
-        auto sparse_cfg = model_config_->get_or<nlohmann::json>("sparse_config", nlohmann::json{});
+        auto sparse_cfg = model_config->get_or<nlohmann::json>("sparse_config", nlohmann::json{});
         if (!sparse_cfg.is_null() && sparse_cfg.contains("window_size")) {
             sparse_window_size = sparse_cfg["window_size"].get<int>();
         } else {
-            sparse_window_size = model_config_->get_or<int>("window_size", -1);
+            sparse_window_size = model_config->get_or<int>("window_size", -1);
         }
     }
     if (sparse_window_size > 0) {
         infllmv2_window_left_ = sparse_window_size;
-        infllmv2_window_right_ = 0;
         use_local_window_ = true;
     }
 
-    INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, num_attention_heads_ * head_dim_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, num_key_value_heads_ * head_dim_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size_, false, dtype, device);
-    INFINICORE_NN_MODULE_INIT(o_gate, hidden_size_, hidden_size_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(q_proj, hidden_size, num_attention_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(k_proj, hidden_size, num_key_value_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(v_proj, hidden_size, num_key_value_heads_ * head_dim_, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(o_proj, num_attention_heads_ * head_dim_, hidden_size, false, dtype, device);
+    INFINICORE_NN_MODULE_INIT(o_gate, hidden_size, hidden_size, false, dtype, device);
 }
 
 void MiniCPMSALAMinicpm4Attention::reset_state() {

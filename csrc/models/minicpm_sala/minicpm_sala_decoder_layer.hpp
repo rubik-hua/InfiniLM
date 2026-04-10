@@ -3,9 +3,7 @@
 #include "minicpm_sala_attention.hpp"
 #include "minicpm_sala_mlp.hpp"
 
-#include "../../backends/attention_backends.hpp"
 #include "../../config/model_config.hpp"
-#include "../../engine/distributed/distributed.hpp"
 
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
@@ -15,8 +13,6 @@
 #include <string>
 
 namespace infinilm::models::minicpm_sala {
-
-class MiniCPMSALAModel;
 
 class MiniCPMSALADecoderLayer : public infinicore::nn::Module {
 public:
@@ -28,11 +24,10 @@ public:
     infinicore::Tensor forward(const infinicore::Tensor &hidden_states,
                                const infinicore::Tensor &position_ids) const;
 
-private:
-    friend class MiniCPMSALAModel;
+    void reset_attn_state();
 
+private:
     double residual_scale_ = 1.0;
-    size_t layer_idx_ = 0;
 
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);

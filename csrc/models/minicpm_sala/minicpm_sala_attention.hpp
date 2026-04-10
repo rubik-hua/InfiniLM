@@ -1,10 +1,7 @@
 #pragma once
 
-#include "../../backends/attention_backends.hpp"
-#include "../../cache/kv_cache.hpp"
 #include "../../config/model_config.hpp"
 #include "../../layers/rotary_embedding/rotary_embedding.hpp"
-#include "../../global_state/global_state.hpp"
 
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/nn/module.hpp"
@@ -53,11 +50,9 @@ protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, o_norm);
     INFINICORE_NN_MODULE(infinicore::nn::Linear, z_proj);
 
-    std::shared_ptr<infinilm::config::ModelConfig> model_config_;
     std::shared_ptr<infinicore::nn::RoPE> rotary_emb_;
 
     size_t layer_idx_;
-    size_t hidden_size_;
     size_t num_attention_heads_;
     size_t num_key_value_heads_;
     size_t head_dim_;
@@ -67,8 +62,6 @@ protected:
     bool use_output_gate_ = false;
     bool use_output_norm_ = false;
     bool use_rope_ = false;
-
-    backends::AttentionBackend attention_backend_;
 
     // Lightning layers only: per-head log-decay for Simple GLA (HF _build_slope_tensor * -1).
     infinicore::Tensor g_gamma_;
@@ -101,9 +94,7 @@ protected:
     INFINICORE_NN_MODULE(infinicore::nn::Linear, o_proj);
     INFINICORE_NN_MODULE(infinicore::nn::Linear, o_gate);
 
-    std::shared_ptr<infinilm::config::ModelConfig> model_config_;
     size_t layer_idx_;
-    size_t hidden_size_;
     size_t num_attention_heads_;
     size_t num_key_value_heads_;
     size_t head_dim_;
@@ -111,10 +102,7 @@ protected:
 
     // InfLLM-v2 local-window masking plumbing.
     int infllmv2_window_left_ = -1;
-    int infllmv2_window_right_ = -1;
     bool use_local_window_ = false;
-
-    backends::AttentionBackend attention_backend_;
 };
 
 } // namespace infinilm::models::minicpm_sala

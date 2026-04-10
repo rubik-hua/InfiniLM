@@ -1,6 +1,5 @@
 #include "minicpm_sala_decoder_layer.hpp"
 
-#include "../../global_state/global_state.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/context/context.hpp"
 #include <cmath>
@@ -17,7 +16,6 @@ MiniCPMSALADecoderLayer::MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::confi
                                                  const infinicore::Device &device,
                                                  size_t layer_idx,
                                                  const std::string &mixer_type) {
-    layer_idx_ = layer_idx;
     // Match parameter dtype with checkpoint `torch_dtype` (e.g. BF16 for MiniCPM-SALA).
     const auto dtype = model_config->get_dtype();
     const double eps = model_config->get<double>("rms_norm_eps");
@@ -37,6 +35,10 @@ MiniCPMSALADecoderLayer::MiniCPMSALADecoderLayer(std::shared_ptr<infinilm::confi
     }
     INFINICORE_NN_MODULE_INIT(post_attention_layernorm, model_config->get<size_t>("hidden_size"), eps, dtype, device);
     INFINICORE_NN_MODULE_INIT(mlp, model_config, device);
+}
+
+void MiniCPMSALADecoderLayer::reset_attn_state() {
+    self_attn_->reset_state();
 }
 
 infinicore::Tensor MiniCPMSALADecoderLayer::forward(const infinicore::Tensor &hidden_states,
