@@ -6,6 +6,7 @@ from safetensors import safe_open
 import glob
 from tqdm import tqdm
 import infinicore
+from infinicore.tensor import from_numpy
 
 
 def parse_dtype(dtype_str: str):
@@ -23,6 +24,13 @@ def parse_dtype(dtype_str: str):
         return infinicore.int64
     else:
         raise ValueError(f"Unknown dtype string: {dtype_str}")
+
+
+def checkpoint_key_to_infini_param_name(name: str) -> str:
+    """Map HF checkpoint keys to InfiniLM parameter names where layouts differ."""
+    return name.replace(
+        ".mlp.gate.e_score_correction_bias", ".mlp.e_score_correction_bias"
+    )
 
 
 str_to_torch_dtype = {
@@ -43,7 +51,9 @@ str_to_torch_dtype = {
 
 def check_parameters(model_keys: list, already_loaded_keys: list):
     model_keys = set(model_keys)
-    already_loaded_keys = set(already_loaded_keys)
+    already_loaded_keys = {
+        checkpoint_key_to_infini_param_name(k) for k in already_loaded_keys
+    }
     intersection = model_keys & already_loaded_keys
 
     missing_keys = model_keys - intersection
@@ -172,7 +182,17 @@ def load_model_state_dict_by_file(
             # --------------------------------------------------------- #
             model_param_infini = {}
             for key in model_param.keys():
-                model_param_infini[key] = infinicore.from_torch(model_param[key])
+                t = model_param[key]
+                if "e_score_correction_bias" in key:
+                    # C++ registers this router bias as F32; checkpoints store fp32 values.
+                    np32 = t.detach().cpu().float().numpy()
+                    model_param_infini[key] = from_numpy(
+                        np32, dtype=infinicore.float32, device=infinicore.device("cpu", 0)
+                    )
+                else:
+                    model_param_infini[key] = infinicore.from_torch(
+                        t.to(dtype=torch_dtype)
+                    )
             model.load_state_dict(model_param_infini, strict=False)
             infinicore.sync_device()
 
@@ -182,9 +202,16 @@ def load_model_state_dict_by_file(
 
         model_param_infini = {}
         for key in model_params.keys():
-            model_param_infini[key] = infinicore.from_torch(
-                model_params[key].to(dtype=torch_dtype)
-            )
+            t = model_params[key]
+            if "e_score_correction_bias" in key:
+                np32 = t.detach().cpu().float().numpy()
+                model_param_infini[key] = from_numpy(
+                    np32, dtype=infinicore.float32, device=infinicore.device("cpu", 0)
+                )
+            else:
+                model_param_infini[key] = infinicore.from_torch(
+                    t.to(dtype=torch_dtype)
+                )
             already_loaded_keys.append(key)
 
         model.load_state_dict(model_param_infini, strict=True)
@@ -221,9 +248,18 @@ def load_model_state_dict_by_tensor(
 
             with safe_open(file_path, "pt", "cpu") as f:
                 for name in f.keys():
-                    weight_infini = infinicore.from_torch(
-                        f.get_tensor(name).to(dtype=torch_dtype)
-                    )
+                    tt = f.get_tensor(name)
+                    if "e_score_correction_bias" in name:
+                        np32 = tt.float().numpy()
+                        weight_infini = from_numpy(
+                            np32,
+                            dtype=infinicore.float32,
+                            device=infinicore.device("cpu", 0),
+                        )
+                    else:
+                        weight_infini = infinicore.from_torch(
+                            tt.to(dtype=torch_dtype)
+                        )
                     model.load_param(name, weight_infini)
                     already_loaded_keys.append(name)
                     infinicore.sync_stream()
@@ -233,9 +269,16 @@ def load_model_state_dict_by_tensor(
         model_params = torch.load(file_path, weights_only=True, map_location="cpu")
 
         for key in model_params.keys():
-            weight_infini = infinicore.from_torch(
-                model_params[key].to(dtype=torch_dtype)
-            )
+            t = model_params[key]
+            if "e_score_correction_bias" in key:
+                np32 = t.detach().cpu().float().numpy()
+                weight_infini = from_numpy(
+                    np32,
+                    dtype=infinicore.float32,
+                    device=infinicore.device("cpu", 0),
+                )
+            else:
+                weight_infini = infinicore.from_torch(t.to(dtype=torch_dtype))
             model.load_param(key, weight_infini)
             already_loaded_keys.append(key)
     else:

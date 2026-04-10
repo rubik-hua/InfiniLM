@@ -39,6 +39,7 @@ class InferEngine(_infinilm.InferEngine):
 
         if device is None:
             device = infinicore.device()
+        self.device = device
 
         super().__init__(
             model_path,
@@ -133,11 +134,23 @@ class InferEngine(_infinilm.InferEngine):
         else:
             eos_token_id = generation_config.eos_token_id
 
+        if eos_token_id is None:
+            eos_token_ids: list[int] = []
+        elif isinstance(eos_token_id, int):
+            eos_token_ids = [eos_token_id]
+        else:
+            eos_token_ids = list(eos_token_id)
+
         past_seq_len = 0
         output_ids = []
         initial_batch_size, initial_seqlen = input_ids.shape[:2]
         seq_len = initial_seqlen
         batch_size = initial_batch_size
+
+        # Ensure prompt is on the same device as the engine/model.
+        # Many helper constructors (e.g. from_list) default to CPU.
+        if input_ids.device.type != self.device.type:
+            input_ids = input_ids.to(self.device)
 
         if batch_size != 1 and generation_config.max_new_tokens is None:
             raise ValueError(
@@ -162,6 +175,7 @@ class InferEngine(_infinilm.InferEngine):
             block_tables = infinicore.from_list(
                 block_tables_list,
                 dtype=infinicore.int32,
+                device=self.device,
             )
 
         for iter in range(0, generation_config.max_new_tokens):
@@ -175,6 +189,7 @@ class InferEngine(_infinilm.InferEngine):
                 position_ids = infinicore.from_list(
                     list(range(past_seq_len, past_seq_len + seq_len)) * batch_size,
                     dtype=infinicore.int64,
+                    device=self.device,
                 )
 
                 if iter == 0:
@@ -201,6 +216,7 @@ class InferEngine(_infinilm.InferEngine):
                 slot_mapping = infinicore.from_list(
                     slot_mapping_list,
                     dtype=infinicore.int64,
+                    device=self.device,
                 )
             else:
                 position_ids = infinicore.from_list(
@@ -209,22 +225,28 @@ class InferEngine(_infinilm.InferEngine):
                         for _ in range(batch_size)
                     ],
                     dtype=infinicore.int64,
+                    device=self.device,
                 )
 
                 slot_mapping = None
 
             past_kv_lengths = infinicore.from_list(
-                [past_seq_len] * batch_size, dtype=infinicore.int32
+                [past_seq_len] * batch_size, dtype=infinicore.int32, device=self.device
             )
             total_kv_lengths = infinicore.from_list(
-                [past_seq_len + seq_len] * batch_size, dtype=infinicore.int32
+                [past_seq_len + seq_len] * batch_size,
+                dtype=infinicore.int32,
+                device=self.device,
             )
             cu_seqlens = infinicore.from_list(
                 [(past_seq_len + seq_len) * i for i in range(batch_size + 1)],
                 dtype=infinicore.int32,
+                device=self.device,
             )
             input_offsets = infinicore.from_list(
-                [seq_len * i for i in range(batch_size + 1)], dtype=infinicore.int32
+                [seq_len * i for i in range(batch_size + 1)],
+                dtype=infinicore.int32,
+                device=self.device,
             )
 
             output_id = self(
@@ -247,7 +269,7 @@ class InferEngine(_infinilm.InferEngine):
                 initial_batch_size == 1
                 and generation_config.stop_on_eos
                 and generation_config.max_new_tokens is not None
-                and output_id.to_numpy()[0] in eos_token_id
+                and output_id.to_numpy()[0] in eos_token_ids
             ):
                 break
 
@@ -286,6 +308,13 @@ class InferEngine(_infinilm.InferEngine):
     def state_dict_keyname(self):
         return super().state_dict()[0].keys()
 
+    def load_param(self, name, param):
+        name = name.replace(
+            ".mlp.gate.e_score_correction_bias", ".mlp.e_score_correction_bias"
+        )
+        underlying = param._underlying if hasattr(param, "_underlying") else param
+        super().load_param(name, underlying)
+
     def load_state_dict(self, state_dict, strict=None):
         for name, param in state_dict.items():
-            super().load_param(name, param._underlying)
+            self.load_param(name, param)
