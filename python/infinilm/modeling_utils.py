@@ -171,9 +171,6 @@ def load_model_state_dict_by_file(
             scale_down = float(cfg["scale_depth"]) / math.sqrt(float(cfg["num_hidden_layers"]))
             if "dim_model_base" in cfg and "hidden_size" in cfg:
                 scale_lm_head = float(cfg["dim_model_base"]) / float(cfg["hidden_size"])
-            # minicpm_sala: only bake embed and lm_head; residual scaling done at forward in C++
-            scale_o = 1.0
-            scale_down = 1.0
     except Exception:
         pass
 

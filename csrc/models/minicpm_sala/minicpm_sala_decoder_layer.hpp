@@ -27,8 +27,6 @@ public:
     void reset_attn_state();
 
 private:
-    double residual_scale_ = 1.0;
-
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);
     // Registered under the HF-compatible name "self_attn" in ctor.
