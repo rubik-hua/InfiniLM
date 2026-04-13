@@ -198,7 +198,8 @@ inline void bind_infer_engine(py::module &m) {
         .def_readwrite("top_p", &InferEngine::Input::top_p);
 
     py::class_<InferEngine::Output>(infer_engine, "Output")
-        .def_readwrite("output_ids", &InferEngine::Output::output_ids, "Output tensor");
+        .def_readwrite("output_ids", &InferEngine::Output::output_ids, "Output tensor")
+        .def_readwrite("logits", &InferEngine::Output::logits, "Last-token logits (batch=1)");
 }
 
 } // namespace infinilm::engine

@@ -13,6 +13,12 @@ def infini_to_ctype_dtype(infini_dtype):
         return ctypes.c_int32
     elif infini_dtype == infinicore.float32:
         return ctypes.c_float
+    elif infini_dtype == infinicore.float16:
+        # Use raw uint16 buffer then view as float16
+        return ctypes.c_uint16
+    elif infini_dtype == infinicore.bfloat16:
+        # Use raw uint16 buffer then view as bfloat16 (via ml_dtypes)
+        return ctypes.c_uint16
     elif infini_dtype == infinicore.int64:
         return ctypes.c_int64
     else:
@@ -34,6 +40,19 @@ def infini_to_numpy(infini_tensor: infinicore.Tensor):
     ArrayType = infini_to_ctype_dtype(infini_tensor_cpu.dtype) * num_elements
     array = ArrayType.from_address(data_ptr)
     np_flat = np.ctypeslib.as_array(array)
+
+    # Reinterpret dtype if needed (fp16/bf16 stored as uint16)
+    if infini_tensor_cpu.dtype == infinicore.float16:
+        np_flat = np_flat.view(np.float16)
+    elif infini_tensor_cpu.dtype == infinicore.bfloat16:
+        try:
+            import ml_dtypes
+
+            np_flat = np_flat.view(ml_dtypes.bfloat16)
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "ml_dtypes is required to convert bfloat16 tensors to numpy."
+            ) from e
 
     # 重塑为原始形状
     np_array = np_flat.reshape(original_shape)

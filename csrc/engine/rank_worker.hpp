@@ -61,6 +61,8 @@ public:
 
     struct Output {
         infinicore::Tensor output_ids;
+        // Optional last-token logits (rank 0, batch=1 sanity use-case).
+        infinicore::Tensor logits;
     };
 
     RankWorker(const InfinilmModel::Config &model_config,
