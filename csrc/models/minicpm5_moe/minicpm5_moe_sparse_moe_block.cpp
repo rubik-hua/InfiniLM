@@ -1,6 +1,8 @@
 #include "minicpm5_moe_sparse_moe_block.hpp"
 
 #include "infinicore/ops/add.hpp"
+#include "infinicore/ops/convert_to_f32.hpp"
+#include "infinicore/ops/linear.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -208,12 +210,19 @@ infinicore::Tensor MiniCPM5MoeSparseMoeBlock::forward(const infinicore::Tensor &
     // topk_weights = scores.gather(topk_indices)
     // optional renorm + scaling
     //
-    // TODO(opt): move this router back to device / use `topkrouter` op.
+    // Router logits: F32 matmul on device; one sync to CPU for existing grouped top-k path.
 
-    auto hs_cpu = hs2d->to(infinicore::Device::cpu());
-    hs_cpu = hs_cpu->contiguous();
-    auto w_cpu = gate_->weight()->to(infinicore::Device::cpu());
-    w_cpu = w_cpu->contiguous();
+    if (!gate_weight_f32_device_.has_value()) {
+        gate_weight_f32_device_ =
+            infinicore::op::convert_to_f32(gate_->weight()->contiguous());
+    }
+
+    auto hs_f32 = infinicore::op::convert_to_f32(hs2d->contiguous());
+    auto router_logits =
+        infinicore::op::linear(hs_f32, gate_weight_f32_device_.value(), std::nullopt);
+    auto logits_cpu = router_logits->to(infinicore::Device::cpu());
+    logits_cpu = logits_cpu->contiguous();
+
     auto bias_cpu = e_score_correction_bias_->to(infinicore::Device::cpu());
     bias_cpu = bias_cpu->contiguous();
 
@@ -226,15 +235,9 @@ infinicore::Tensor MiniCPM5MoeSparseMoeBlock::forward(const infinicore::Tensor &
     std::vector<int32_t> chosen_experts;
 
     for (size_t t = 0; t < n_tokens; ++t) {
-        // Compute router logits in f32 on CPU from (possibly bf16/f16) hs + weight.
         for (size_t e = 0; e < n_routed_experts; ++e) {
-            float acc = 0.0f;
-            for (size_t i = 0; i < hidden_size; ++i) {
-                float x = scalar_to_f32(hs_cpu, t * hidden_size + i);
-                float w = scalar_to_f32(w_cpu, e * hidden_size + i);
-                acc += x * w;
-            }
-            scores_row[e] = sigmoid_f32(acc);
+            float logit = scalar_to_f32(logits_cpu, t * n_routed_experts + e);
+            scores_row[e] = sigmoid_f32(logit);
         }
 
         // scores_for_choice = scores + e_score_correction_bias

@@ -2,6 +2,8 @@
 
 #include "../../layers/common_modules.hpp"
 
+#include <optional>
+
 namespace infinilm::models::minicpm5_moe {
 
 using MiniCPM5MoeMLP = infinilm::layers::MoeMLP;
@@ -23,6 +25,9 @@ protected:
     INFINICORE_NN_PARAMETER(e_score_correction_bias);
     INFINICORE_NN_MODULE_VEC(MiniCPM5MoeMLP, experts);
     INFINICORE_NN_MODULE(MiniCPM5MoeMLP, shared_experts);
+
+    /// Lazily built F32 copy of `gate` weights on device for `linear` router logits (HF: matmul in float32).
+    mutable std::optional<infinicore::Tensor> gate_weight_f32_device_;
 };
 
 } // namespace infinilm::models::minicpm5_moe

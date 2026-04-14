@@ -1,20 +1,27 @@
 import argparse
 import os
 import json
+import sys
 import tempfile
 
 import numpy as np
 
+_LOGIT_LINKER_REEXEC = "LOGIT_SANITY_LINKER_REEXEC"
 
-def _hpcx_flash_env():
-    # Keep this script self-contained for the container.
+
+def _ensure_linker_env():
+    """Re-exec once so LD_LIBRARY_PATH / LD_PRELOAD apply at process start (required for dlopen)."""
+    if os.environ.get(_LOGIT_LINKER_REEXEC) == "1":
+        return
     torch_lib = "/usr/local/lib/python3.12/dist-packages/torch/lib"
     fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    os.environ["LD_LIBRARY_PATH"] = ":".join(
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    env["LD_LIBRARY_PATH"] = ":".join(
         [
-            "/opt/hpcx/ucc/lib",
-            "/opt/hpcx/ucx/lib",
             "/opt/hpcx/ompi/lib",
+            "/opt/hpcx/ucx/lib",
+            "/opt/hpcx/ucc/lib",
             "/root/.infini/lib",
             torch_lib,
             "/usr/local/lib/python3.12/dist-packages",
@@ -23,7 +30,9 @@ def _hpcx_flash_env():
             "/lib/x86_64-linux-gnu",
         ]
     )
-    os.environ["LD_PRELOAD"] = fa
+    env["LD_PRELOAD"] = fa
+    env[_LOGIT_LINKER_REEXEC] = "1"
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)
 
 
 def topk(x: np.ndarray, k: int):
@@ -33,14 +42,14 @@ def topk(x: np.ndarray, k: int):
 
 
 def main():
+    _ensure_linker_env()
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True)
     ap.add_argument("--prompt", default="Hi")
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--mini-layers", type=int, default=1)
     args = ap.parse_args()
-
-    _hpcx_flash_env()
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
