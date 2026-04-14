@@ -17,8 +17,9 @@ MiniCPM5MoeDecoderLayer::MiniCPM5MoeDecoderLayer(std::shared_ptr<infinilm::confi
 
     self_attn_ = this->register_module<MiniCPM5MoeAttention>("self_attn", model_config, layer_idx, device);
 
-    // MiniCPM5-MoE checkpoints use a dense MLP for the first layer and routed experts afterwards.
-    if (layer_idx == 0) {
+    // HF: `first_k_dense_replace` shallow layers use dense `MiniCPM5MoEMLP`; deeper layers use MoE.
+    const size_t first_k_dense_replace = model_config->get_or<size_t>("first_k_dense_replace", 0);
+    if (layer_idx < first_k_dense_replace) {
         dense_mlp_ = this->register_module<MiniCPM5DenseMLP>("mlp", model_config, device);
     } else {
         moe_mlp_ = this->register_module<MiniCPM5MoeSparseMoeBlock>("mlp", model_config, device);

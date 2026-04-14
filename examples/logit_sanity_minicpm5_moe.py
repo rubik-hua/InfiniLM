@@ -56,6 +56,13 @@ def main():
     # Create a temporary \"mini\" checkpoint with fewer layers to isolate layer-0 correctness.
     # This keeps both HF and InfiniLM constructing the same depth.
     if args.mini_layers is not None and args.mini_layers > 0:
+        full_cfg = json.load(open(os.path.join(model_path, "config.json")))
+        full_layers = int(full_cfg.get("num_hidden_layers", 0))
+        # If requested layers equals the original, skip mini-checkpoint creation.
+        if int(args.mini_layers) == full_layers:
+            args.mini_layers = 0
+
+    if args.mini_layers is not None and args.mini_layers > 0:
         tmpdir = tempfile.mkdtemp(prefix="minicpm5_moe_mini_")
         mini_path = os.path.join(tmpdir, "ckpt")
         os.makedirs(mini_path, exist_ok=True)

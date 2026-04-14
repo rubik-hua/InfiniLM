@@ -11,6 +11,12 @@ public:
     MoeMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
            const infinicore::Device &device);
 
+    /// Same as the default constructor, but overrides `moe_intermediate_size` (used e.g. for shared experts:
+    /// HF uses `moe_intermediate_size * n_shared_experts`).
+    MoeMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
+           const infinicore::Device &device,
+           size_t moe_intermediate_size_override);
+
     infinicore::Tensor forward(const infinicore::Tensor &hidden_states) const;
 
     size_t hidden_size() const { return hidden_size_; }

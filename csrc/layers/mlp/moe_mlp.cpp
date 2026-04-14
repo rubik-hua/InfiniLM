@@ -5,11 +5,16 @@
 namespace infinilm::layers::moe_mlp {
 
 MoeMLP::MoeMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
-               const infinicore::Device &device) {
+               const infinicore::Device &device)
+    : MoeMLP(model_config, device, model_config->get<size_t>("moe_intermediate_size")) {}
+
+MoeMLP::MoeMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
+               const infinicore::Device &device,
+               size_t moe_intermediate_size_override) {
 
     const auto &dtype{model_config->get_dtype()};
     hidden_size_ = model_config->get<size_t>("hidden_size");
-    moe_intermediate_size_ = model_config->get<size_t>("moe_intermediate_size");
+    moe_intermediate_size_ = moe_intermediate_size_override;
     use_bias_ = model_config->get_or<bool>("mlp_bias", false);
 
     const engine::distributed::RankInfo &rank_info = infinilm::global_state::get_tensor_model_parallel_rank_info();
