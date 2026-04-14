@@ -1,10 +1,167 @@
-# MiniCPM5 MoE — inference profiling (InfiniLM vs HF)
+# MiniCPM5 MoE — inference profiling (InfiniLM vs HF vs vLLM)
 
 Use this document as a **continuous profiling** log: fill the environment block each session, then append or update the run table with fresh numbers. Workload settings should stay fixed when comparing engines.
 
 ---
 
+## vLLM (profiling container)
+
+**Use a dedicated Python environment for vLLM.** Keep vLLM inside **`$REPO/.venv-vllm`** and run InfiniLM/HF (`jiuge.py`, `hf_bench_match_jiuge.py`) with **system** `python3` (venv deactivated).
+
+### venv layout (recommended)
+
+| Interpreter | Role |
+|-------------|------|
+| Container default `python3` | InfiniLM, HF bench, logit sanity (`transformers==4.57.1`) |
+| **`$REPO/.venv-vllm`** | vLLM + its dependencies only (MoE probes may additionally need **`transformers>=5`**; see below) |
+
+**One-command setup** (from repo checkout; creates `$REPO/.venv-vllm` only):
+
+```bash
+# Dense models only (Transformers 4.x as pulled in by vLLM):
+bash InfiniLM/examples/setup_vllm_venv.sh
+
+# Same, plus Transformers 5.x for TransformersMoEForCausalLM / MiniCPM5 MoE attempts:
+bash InfiniLM/examples/setup_vllm_venv.sh --moe
+
+# Use Tsinghua (tuna) PyPI mirror — often faster in China; combines with --moe:
+bash InfiniLM/examples/setup_vllm_venv.sh --moe --tsinghua
+```
+
+Or set a custom index (overrides `--tsinghua` if both are set):
+
+```bash
+export VLLM_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export VLLM_PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+bash InfiniLM/examples/setup_vllm_venv.sh --moe
+```
+
+Or manually inside `minicpm5-moe` (or host, if paths/GPU match):
+
+```bash
+REPO=/home/zenghua/workspace/minicpm5-moe-support
+python3 -m venv "$REPO/.venv-vllm"
+source "$REPO/.venv-vllm/bin/activate"
+python -m pip install -U pip
+python -m pip install 'vllm==0.19.0'
+```
+
+**Pinned version:** `vllm==0.19.0` (session: 2026-04-14). Inside the venv this installs PyPI **`torch==2.10.0`** / **`torchvision==0.25.0`** / **`torchaudio==2.10.0`** (`+cu128` wheels) **only in `.venv-vllm`**, leaving system `python3` unchanged.
+
+**Runtime check (with venv active):**
+
+```bash
+source /home/zenghua/workspace/minicpm5-moe-support/.venv-vllm/bin/activate
+python -c "import vllm, torch; print('vllm', vllm.__version__); print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+```
+
+On success you should see `cuda True` and a device name from `torch.cuda.get_device_name(0)` when a GPU is visible.
+
+**Every vLLM command** in this doc assumes `source "$REPO/.venv-vllm/bin/activate"` first (or an equivalent `python` from that venv).
+
+### Isolated venv — avoid trashing the HF / InfiniLM interpreter
+
+Use a **standard** virtualenv (**do not** pass `--system-site-packages` unless you have a deliberate reason). Then:
+
+- **`pip install` only mutates `$REPO/.venv-vllm`**.
+- **`python3` with the venv deactivated** stays on the image defaults (**`transformers==4.57.1`**, NVIDIA Torch, etc.) for `jiuge.py`, `hf_bench_match_jiuge.py`, and logit sanity.
+
+Never install vLLM into the same environment as HF parity work.
+
+### Trying MiniCPM5 MoE via **`TransformersMoEForCausalLM`** (Transformers fallback)
+
+vLLM has **no native** MiniCPM5-MoE kernel path. For this checkpoint it **falls back** to the generic **`TransformersMoEForCausalLM`** backend (log line: *no vLLM implementation, falling back to Transformers implementation*). That path is what you are “trying” when you run vLLM with `trust_remote_code=True` on MiniCPM5.
+
+**Inside `.venv-vllm` only**, after vLLM is installed (e.g. `setup_vllm_venv.sh` or manual `pip install 'vllm==0.19.0'`):
+
+1. **Raise Transformers for the MoE backend** (still isolated; system Python unchanged). Skip if you already ran **`setup_vllm_venv.sh --moe`**.
+
+   ```bash
+   source "$REPO/.venv-vllm/bin/activate"
+   python -m pip install 'transformers>=5.0.0,<6'
+   ```
+
+   Pip may warn that vLLM’s metadata prefers `transformers<5`; that is expected for this **experimental** fallback. All warnings apply **only** to the vLLM venv.
+
+2. **Probe load** (real file, spawn-safe):
+
+   ```bash
+   python "$REPO/InfiniLM/examples/vllm_probe_load.py" \
+     --model-path /path/to/minicpm5 \
+     --max-model-len 8192 \
+     --enforce-eager
+   ```
+
+   When the engine starts, logs should show **`TransformersMoEForCausalLM`** (Transformers MoE fallback).
+
+3. **Benchmark** (single-prompt metrics):
+
+   ```bash
+   python -u "$REPO/InfiniLM/examples/vllm_bench_match_jiuge.py" \
+     --model-path /path/to/minicpm5 \
+     --prompt "Hi" --max-new-tokens 16 \
+     --enforce-eager
+   ```
+
+   Add `--enforce-eager` first when remote code or MoE hits `torch.compile` issues.
+
+4. **If it still fails** after load (e.g. `TransformersFusedMoE` / `len(self.experts)`), the checkpoint’s remote `modeling_*.py` is **incompatible** with vLLM’s fused expert wrapper; fixing that is a **model/vLLM integration** task, not an environment issue — your HF stack was never modified.
+
+### MiniCPM5-MoE on vLLM (model gate)
+
+| Item | Detail |
+|------|--------|
+| Checkpoint | `config.json` lists `architectures: ["MiniCPM5MoEForCausalLM"]`, `model_type: minicpm5_moe` |
+| vLLM 0.19 behavior | Resolves to **`TransformersMoEForCausalLM`** (log: *no vLLM implementation, falling back to Transformers*). MoE path requires the Transformers modeling backend. |
+| **Transformers pin tension** | vLLM **0.19.0** declares **`transformers>=4.56,<5`**, while **`TransformersMoEForCausalLM`** **requires `transformers>=5.0.0`**. **Preferred:** install **`transformers>=5` only inside isolated `.venv-vllm`** (see steps above). Alternative for disk-saving hacks: a throwaway venv with **`--system-site-packages`** plus an overlaid Transformers (resolver warnings); do **not** use that for the HF interpreter. |
+| **Gate: Transformers 4.x** | With **4.57.1**, engine fails at model init: `ImportError: … requires transformers>=5.0.0 for MoE models support`. |
+| **Gate: MiniCPM5 + Transformers 5 + vLLM 0.19** | Without patching, the checkpoint’s remote `modeling_minicpm.py` hits **`TypeError: object of type 'TransformersFusedMoE' has no len()`** inside MoE (`one_hot(..., num_classes=len(self.experts))`). |
+| **Workaround (A1 patch, 2026-04-14)** | With the `sitecustomize` patch enabled (see `vllm_minicpm5_moe_patch.md`) and **`--enforce-eager`**, MiniCPM5 MoE **loads** and `vllm_bench_match_jiuge.py` can report **single-prompt TTFT / decode ITL**. |
+| HF baseline note | Keep **`transformers==4.57.1`** on **system** `python3` for HF parity. All vLLM + Transformers‑5 experiments stay in **`.venv-vllm`** (isolated). |
+
+Reproduce the gate (must use a **real `.py` file**; vLLM workers use `spawn` and cannot start from `python -` / stdin):
+
+```bash
+REPO=/home/zenghua/workspace/minicpm5-moe-support
+source "$REPO/.venv-vllm/bin/activate"
+export PYTHONPATH="$REPO/InfiniLM/examples/vllm_patches:${PYTHONPATH:-}"
+cd "$REPO/InfiniLM/examples"
+export CUDA_VISIBLE_DEVICES=0   # optional
+python vllm_probe_load.py --model-path /path/to/minicpm5 --enforce-eager
+```
+
+**Enable the MiniCPM5 MoE vLLM patch (recommended for this checkpoint):**
+
+```bash
+export PYTHONPATH="$REPO/InfiniLM/examples/vllm_patches:${PYTHONPATH:-}"
+```
+
+### Fallback model (vLLM path smoke test)
+
+To confirm vLLM + GPU without MiniCPM, the same probe succeeds on a small local **Qwen3** checkpoint, e.g.:
+
+```bash
+REPO=/home/zenghua/workspace/minicpm5-moe-support
+source "$REPO/.venv-vllm/bin/activate"
+python "$REPO/InfiniLM/examples/vllm_probe_load.py" \
+  --model-path /data-aisoft/mechdancer/models/Qwen3-0.6B \
+  --max-model-len 256
+```
+
+**2026-04-14:** `LOAD_OK` on `Qwen3-0.6B` with `vllm==0.19.0`, A100, `CUDA_VISIBLE_DEVICES=0`.
+
+---
+
 ## Environment (per run)
+
+**Interpreter note (important):**
+
+- **HF / InfiniLM** runs use **system** `python3` (with `.venv-vllm` **deactivated**).
+- **vLLM** runs use **`$REPO/.venv-vllm`** (activated).
+
+**Current container baseline (minicpm5-moe, 2026-04-14):** system `python3` imports
+**`torch==2.10.0+cu128`** and **`transformers==4.57.1`**.
+If your system `python3` differs (e.g. after a global `pip install vllm`), recreate the container or keep vLLM strictly inside `.venv-vllm`.
 
 | Field | Value |
 |--------|--------|
@@ -13,6 +170,7 @@ Use this document as a **continuous profiling** log: fill the environment block 
 | CUDA / driver | |
 | PyTorch | |
 | Transformers | |
+| vLLM | (if used; e.g. `0.19.0`; interpreter: `$REPO/.venv-vllm`) |
 | Git commit / branch | |
 | Model path | |
 
@@ -51,6 +209,22 @@ Use this document as a **continuous profiling** log: fill the environment block 
 | **Decode total** | Sum of per-step decode forwards (HF manual loop) |
 | **Decode avg / step** | `decode_total / max_new_tokens` |
 
+### vLLM (`vllm_bench_match_jiuge.py`) — aligned definitions
+
+`LLM` is constructed with **`disable_log_stats=False`** so each finished `RequestOutput` carries **`RequestStateStats`**.
+
+| Label | Source in vLLM | Match to jiuge / HF bench |
+|--------|----------------|---------------------------|
+| **TTFT** | `metrics.first_token_latency` (wall, arrival → first generated token) | Same role as jiuge first-step time for “first token out” |
+| **Prefill (engine)** | `metrics.first_token_ts - metrics.scheduled_ts` (monotonic) | Roughly “in-model” prefill; not identical to HF’s isolated `forward` timing |
+| **Decode total (engine)** | `metrics.last_token_ts - metrics.first_token_ts` (monotonic) | Spans all decode token steps |
+| **Avg decode ITL / step** | `(last - first) / (num_generation_tokens - 1)` when `num_generation_tokens > 1` | Same exclusion of the first generated token as jiuge’s `time_measurements[1:]` mean |
+| **Prefill tok/s** | `prompt_tokens / TTFT` | Same formula as jiuge printout when TTFT matches |
+| **Decode tok/s** | `(n_generated - 1) / decode_engine_s` | Same as glossary under “decode excludes first output step” |
+| **Load weights** | Wall time for `LLM(...)` construction | Includes engine init / compile / CUDA graphs unless `--enforce-eager` |
+
+**Note:** Decode/prefill intervals use the engine’s **monotonic** timestamps; TTFT uses **wall** time. Throughput derived from monotonic decode length is comparable across runs on the same machine but not necessarily identical to wall-clock decode.
+
 ### Example snapshot (replace on every profile pass)
 
 Numbers below are **examples only** from one session; do not treat them as baselines.
@@ -64,6 +238,15 @@ Numbers below are **examples only** from one session; do not treat them as basel
 | Decode total (16 steps) | — | ~4810 ms | — |
 | Decode avg / step | ~54 ms | ~301 ms | — |
 | Prefill + decode (manual) | — | ~5734 ms | — |
+
+### vLLM snapshot (single prompt, MiniCPM5 MoE; patch enabled)
+
+The numbers below come from `vllm_bench_match_jiuge.py` with `--enforce-eager` and the `sitecustomize` patch enabled.
+
+| Engine | Prompt | Prompt tok | max_new_tokens | TTFT (ms) | Avg decode ITL (ms) | Prefill tok/s | Decode tok/s |
+|--------|--------|------------|----------------|-----------|---------------------|---------------|--------------|
+| vLLM (TransformersMoEForCausalLM) | `Hi` | 7 | 4 | ~591 | ~48.3 | ~11.84 | ~20.70 |
+| vLLM (TransformersMoEForCausalLM) | A100 poem + MoE bullets | 38 | 16 | **149.73** | **39.49** | (see JSON) | (see JSON) |
 
 ---
 
@@ -79,6 +262,12 @@ python3 -u InfiniLM/examples/jiuge.py --nvidia \
   --top-k 1 --top-p 1.0 --temperature 1.0 --attn default
 ```
 
+**E2E rebuild + run (one line, inside `minicpm5-moe` container):**
+
+```bash
+docker exec minicpm5-moe bash -lc 'set -euo pipefail; export CUDA_VISIBLE_DEVICES=0; REPO=/home/zenghua/workspace/minicpm5-moe-support; MODEL=/data-aisoft/zenghua/models/minicpm5.16a3.v0314; PROMPT="Write a short poem about the A100 GPU, then explain in 3 bullet points what a mixture-of-experts model is and why routing matters."; export XMAKE_ROOT=y; export PYTHONPATH=$REPO/InfiniLM/python:$REPO/InfiniCore/python:${PYTHONPATH:-}; cd $REPO/InfiniCore; python3 scripts/install.py --nv-gpu=y --cuda_arch=sm_80 --aten=y; xmake build _infinicore; xmake install _infinicore; cd $REPO/InfiniLM; xmake build _infinilm; xmake install _infinilm; TORCH_LIB=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))"); FA=/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so; (export LD_LIBRARY_PATH=/root/.infini/lib:$TORCH_LIB:/usr/local/lib/python3.12/dist-packages:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu; export LD_PRELOAD=$FA; cd $REPO/InfiniLM/examples; python3 -u jiuge.py --nvidia --model-path "$MODEL" --prompt "$PROMPT" --max-new-tokens 16 --batch-size 1 --top-k 1 --top-p 1.0 --temperature 1.0 --tp 1 --attn default)'
+```
+
 ### Hugging Face (matched tokenization and sampling knobs)
 
 ```bash
@@ -88,13 +277,37 @@ python3 -u InfiniLM/examples/hf_bench_match_jiuge.py \
   --top-k 1 --top-p 1.0 --temperature 1.0
 ```
 
+### vLLM (jiuge-aligned `TokensPrompt`; single prompt)
+
+Use the **vLLM venv** (see above). For MiniCPM5 MoE on vLLM 0.19, enable the patch and use `--enforce-eager`.
+
+```bash
+REPO=/home/zenghua/workspace/minicpm5-moe-support
+source "$REPO/.venv-vllm/bin/activate"
+export PYTHONPATH="$REPO/InfiniLM/examples/vllm_patches:${PYTHONPATH:-}"
+export CUDA_VISIBLE_DEVICES=0   # optional
+
+python -u "$REPO/InfiniLM/examples/vllm_bench_match_jiuge.py" \
+  --model-path /path/to/model \
+  --prompt "Hi" --max-new-tokens 16 --batch-size 1 \
+  --top-k 1 --top-p 1.0 --temperature 1.0 \
+  --max-model-len 8192
+
+# Machine-readable:
+python -u "$REPO/InfiniLM/examples/vllm_bench_match_jiuge.py" ... --json
+```
+
+For models that fault under `torch.compile`, add **`--enforce-eager`**.
+
 ---
 
 ## Continuous run log
 
 | Run | Date | Engine | Load (s) | Prefill (ms) | Dec avg (ms) | Gen total (ms) | Notes |
 |-----|------|--------|----------|--------------|--------------|----------------|-------|
-| | | | | | | | |
+| long-prompt-validate | 2026-04-14 | InfiniLM (`jiuge.py`) | — | — | **54.18** (avg ITL) | — | Prompt tok=39; TTFT=**1820.74** ms |
+| long-prompt-validate | 2026-04-14 | HF (`hf_bench_match_jiuge.py`) | — | **1136.53** | **286.40** (avg/step) | — | Prompt tok=39; greedy |
+| long-prompt-validate | 2026-04-14 | vLLM (`vllm_bench_match_jiuge.py`) | — | — | **39.49** (avg ITL) | — | Prompt tok=38; TTFT=**149.73** ms; `--enforce-eager` + patch |
 
 ---
 
@@ -102,4 +315,8 @@ python3 -u InfiniLM/examples/hf_bench_match_jiuge.py \
 
 - `InfiniLM/examples/jiuge.py` — InfiniLM generation driver
 - `InfiniLM/examples/hf_bench_match_jiuge.py` — HF timing with jiuge-aligned tokenization
+- `InfiniLM/examples/setup_vllm_venv.sh` — create isolated `.venv-vllm` (`--moe` = Transformers 5 for MoE fallback)
+- `InfiniLM/examples/vllm_probe_load.py` — minimal vLLM `LLM(...)` load probe (spawn-safe)
+- `InfiniLM/examples/vllm_bench_match_jiuge.py` — single-prompt vLLM TTFT / decode ITL / throughput (jiuge-aligned tokens)
+- `InfiniLM/examples/vllm_minicpm5_moe_patch.md` — why/how the MiniCPM5 MoE vLLM patch works
 - `InfiniLM/examples/logit_sanity_minicpm5_moe.py` — correctness / logit sanity vs HF
