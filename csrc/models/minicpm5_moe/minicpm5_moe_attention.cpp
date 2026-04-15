@@ -2,6 +2,7 @@
 
 #include "../../global_state/global_state.hpp"
 #include "../../layers/rotary_embedding/rotary_embedding.hpp"
+#include "../../utils/nvtx.hpp"
 #include "infinicore/ops/mul.hpp"
 #include "infinicore/ops/sigmoid.hpp"
 
@@ -74,6 +75,7 @@ MiniCPM5MoeAttention::MiniCPM5MoeAttention(std::shared_ptr<infinilm::config::Mod
 
 infinicore::Tensor MiniCPM5MoeAttention::forward(const infinicore::Tensor &position_ids,
                                                  const infinicore::Tensor &hidden_states) const {
+    infinilm::utils::NvtxRange nvtx_attn("MiniCPM5MoeAttention::forward");
     // Mirror `qwen3::Qwen3Attention` tensor shaping and RoPE application, with MiniCPM5 gated attention.
     auto shape = hidden_states->shape();
     size_t batch_size = shape[0];
@@ -140,6 +142,10 @@ infinicore::Tensor MiniCPM5MoeAttention::forward(const infinicore::Tensor &posit
         // Gate (HF parity): attn_out *= sigmoid(gate_score)
         if (use_gated_attention_) {
             auto gate = infinicore::op::sigmoid(gate_score);
+            // Flash/paged attention returns [1,S,H*D] while gate_score is [S,H*D] for batch_size=1.
+            if (attn_output->shape().size() == 3 && gate->shape().size() == 2 && attn_output->shape()[0] == 1) {
+                gate = gate->view({1, gate->shape()[0], gate->shape()[1]});
+            }
             attn_output = infinicore::op::mul(attn_output, gate);
         }
 
@@ -200,6 +206,9 @@ infinicore::Tensor MiniCPM5MoeAttention::forward(const infinicore::Tensor &posit
     auto attn_output = attn_->forward(q, k_reshaped, v_reshaped);
     if (use_gated_attention_) {
         auto gate = infinicore::op::sigmoid(gate_score);
+        if (attn_output->shape().size() == 3 && gate->shape().size() == 2 && attn_output->shape()[0] == 1) {
+            gate = gate->view({1, gate->shape()[0], gate->shape()[1]});
+        }
         attn_output = infinicore::op::mul(attn_output, gate);
     }
     return o_proj_->forward(attn_output);

@@ -50,16 +50,16 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
     // 2. Compute attention
     infinicore::Tensor attn_output = infinicore::Tensor::empty({seq_len, num_heads_, head_dim_}, query->dtype(), query->device());
     if (is_prefill) {
-        infinicore::op::mha_varlen_(
+        // NOTE: In this build, flash-attn varlen prefill can crash with tensors that
+        // don't have Torch storage. Use the paged-attention prefill kernel for stability.
+        infinicore::op::paged_attention_prefill_(
             attn_output,
             query,
-            k_total->permute({0, 2, 1, 3}),
-            v_total->permute({0, 2, 1, 3}),
-            input_offsets.value(),
-            cu_seqlens.value(),
+            k_total,
+            v_total,
             block_tables.value(),
-            max_position_embeddings_,
-            max_position_embeddings_,
+            total_sequence_lengths.value(),
+            input_offsets.value(),
             std::nullopt,
             scale_);
     } else {

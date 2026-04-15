@@ -63,6 +63,12 @@ public:
         infinicore::Tensor output_ids;
         // Optional last-token logits (rank 0, batch=1 sanity use-case).
         infinicore::Tensor logits;
+
+        // Optional profiling (CUDA-event timings on the worker stream).
+        // Values are 0 when profiling is disabled.
+        float gpu_forward_ms{0.0f};
+        float gpu_sampling_ms{0.0f};
+        float gpu_d2h_ms{0.0f};
     };
 
     RankWorker(const InfinilmModel::Config &model_config,

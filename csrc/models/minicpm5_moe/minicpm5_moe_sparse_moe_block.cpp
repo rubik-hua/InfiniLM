@@ -3,6 +3,7 @@
 #include "infinicore/ops/add.hpp"
 #include "infinicore/ops/convert_to_f32.hpp"
 #include "infinicore/ops/linear.hpp"
+#include "../../utils/nvtx.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -174,6 +175,7 @@ MiniCPM5MoeSparseMoeBlock::MiniCPM5MoeSparseMoeBlock(std::shared_ptr<infinilm::c
 }
 
 infinicore::Tensor MiniCPM5MoeSparseMoeBlock::forward(const infinicore::Tensor &hidden_states) const {
+    infinilm::utils::NvtxRange nvtx_moe("MiniCPM5MoeSparseMoeBlock::forward");
     // Correctness-first (slow) CPU-style dispatch.
     //
     // TODO(opt): batch tokens per expert and fuse router+dispatch on-device.

@@ -3,7 +3,9 @@
 #include "../global_state/global_state.hpp"
 #include "../models/model_factory.hpp"
 #include "../models/models_registry.hpp"
+#include "../utils/nvtx.hpp"
 #include "infinicore/ops.hpp"
+#include <cstdlib>
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -345,6 +347,16 @@ void RankWorker::thread_loop() {
                     {
                         std::lock_guard<std::mutex> lk(mutex_);
 
+                        infinilm::utils::NvtxRange nvtx_run("RankWorker::RUN");
+
+                        const bool enable_step_timing =
+                            (std::getenv("INFINILM_PROFILE_STEP_TIMING") != nullptr);
+                        auto stream = infinicore::context::getStream();
+                        infinirtEvent_t ev_fwd_start{nullptr}, ev_fwd_end{nullptr};
+                        infinirtEvent_t ev_samp_start{nullptr}, ev_samp_end{nullptr};
+                        infinirtEvent_t ev_d2h_start{nullptr}, ev_d2h_end{nullptr};
+                        float fwd_ms = 0.0f, samp_ms = 0.0f, d2h_ms = 0.0f;
+
                         infinicore::Tensor logits;
                         // Try to get compiled graph
                         if (compiler_ != nullptr) {
@@ -357,7 +369,18 @@ void RankWorker::thread_loop() {
                         // Fall back to eager mode
                         if (!logits) {
                             auto model_args = local_args.to_model_input(rank_info_.device);
+                            if (enable_step_timing) {
+                                ev_fwd_start = infinicore::context::createEvent();
+                                ev_fwd_end = infinicore::context::createEvent();
+                                infinicore::context::recordEvent(ev_fwd_start, stream);
+                            }
+                            {
+                                infinilm::utils::NvtxRange nvtx_fwd("model_->forward");
                             logits = model_->forward(model_args).logits;
+                            }
+                            if (enable_step_timing) {
+                                infinicore::context::recordEvent(ev_fwd_end, stream);
+                            }
                         }
 
                         // Random sampling (rank 0 only)
@@ -377,6 +400,13 @@ void RankWorker::thread_loop() {
                             auto output_ids{infinicore::Tensor::empty({n_req}, infinicore::DataType::I64, rank_info_.device)};
                             infinicore::Tensor last_logits;
 
+                            if (enable_step_timing) {
+                                ev_samp_start = infinicore::context::createEvent();
+                                ev_samp_end = infinicore::context::createEvent();
+                                infinicore::context::recordEvent(ev_samp_start, stream);
+                            }
+                            {
+                                infinilm::utils::NvtxRange nvtx_sampling("sampling(random_sample)");
                             for (auto i{decltype(n_req)(0)}; i < n_req; ++i) {
                                 auto score{logits->view({batch_size * total_len, vocab_size})->narrow({{0, size_t(input_offsets[i + 1] - 1), 1}})->view({vocab_size})};
                                 auto out{output_ids->narrow({{0, i, 1}})->view({})};
@@ -387,14 +417,52 @@ void RankWorker::thread_loop() {
                                 infinicore::op::random_sample_(
                                     out, score, random_val, top_p, top_k, temperature);
                             }
+                            }
+                            if (enable_step_timing) {
+                                infinicore::context::recordEvent(ev_samp_end, stream);
+                            }
 
+                            if (enable_step_timing) {
+                                ev_d2h_start = infinicore::context::createEvent();
+                                ev_d2h_end = infinicore::context::createEvent();
+                                infinicore::context::recordEvent(ev_d2h_start, stream);
+                            }
+                            {
+                                infinilm::utils::NvtxRange nvtx_d2h("d2h(output_ids)");
                             output_ids = output_ids->to(infinicore::Device::cpu());
+                            }
+
+                            if (enable_step_timing) {
+                                infinicore::context::recordEvent(ev_d2h_end, stream);
+                            }
 
                             infinicore::context::syncStream();
 
-                            auto out{Output{output_ids, last_logits}};
+                            if (enable_step_timing) {
+                                infinicore::context::synchronizeEvent(ev_d2h_end);
+                                if (ev_fwd_start != nullptr && ev_fwd_end != nullptr) {
+                                    fwd_ms = infinicore::context::elapsedTime(ev_fwd_start, ev_fwd_end);
+                                }
+                                if (ev_samp_start != nullptr && ev_samp_end != nullptr) {
+                                    samp_ms = infinicore::context::elapsedTime(ev_samp_start, ev_samp_end);
+                                }
+                                if (ev_d2h_start != nullptr && ev_d2h_end != nullptr) {
+                                    d2h_ms = infinicore::context::elapsedTime(ev_d2h_start, ev_d2h_end);
+                                }
+                            }
+
+                            auto out{Output{output_ids, last_logits, fwd_ms, samp_ms, d2h_ms}};
 
                             output_ = std::move(out);
+                        }
+
+                        if (enable_step_timing) {
+                            if (ev_fwd_start != nullptr) infinicore::context::destroyEvent(ev_fwd_start);
+                            if (ev_fwd_end != nullptr) infinicore::context::destroyEvent(ev_fwd_end);
+                            if (ev_samp_start != nullptr) infinicore::context::destroyEvent(ev_samp_start);
+                            if (ev_samp_end != nullptr) infinicore::context::destroyEvent(ev_samp_end);
+                            if (ev_d2h_start != nullptr) infinicore::context::destroyEvent(ev_d2h_start);
+                            if (ev_d2h_end != nullptr) infinicore::context::destroyEvent(ev_d2h_end);
                         }
 
                         job_done_ = true;

@@ -199,7 +199,10 @@ inline void bind_infer_engine(py::module &m) {
 
     py::class_<InferEngine::Output>(infer_engine, "Output")
         .def_readwrite("output_ids", &InferEngine::Output::output_ids, "Output tensor")
-        .def_readwrite("logits", &InferEngine::Output::logits, "Last-token logits (batch=1)");
+        .def_readwrite("logits", &InferEngine::Output::logits, "Last-token logits (batch=1)")
+        .def_readwrite("gpu_forward_ms", &InferEngine::Output::gpu_forward_ms, "CUDA-event forward time (ms)")
+        .def_readwrite("gpu_sampling_ms", &InferEngine::Output::gpu_sampling_ms, "CUDA-event sampling time (ms)")
+        .def_readwrite("gpu_d2h_ms", &InferEngine::Output::gpu_d2h_ms, "CUDA-event device->host copy time (ms)");
 }
 
 } // namespace infinilm::engine

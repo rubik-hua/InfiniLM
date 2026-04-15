@@ -98,24 +98,77 @@ class InferEngine(_infinilm.InferEngine):
                 slot_mapping._underlying if slot_mapping is not None else None
             )
 
-            return infinicore.Tensor(
-                super()
-                .forward(
-                    super().Input(
-                        input_ids,
-                        position_ids=position_ids,
-                        past_sequence_lengths=past_kv_lengths,
-                        total_sequence_lengths=total_kv_lengths,
-                        input_offsets=input_offsets,
-                        cu_seqlens=cu_seqlens,
-                        block_tables=block_tables,
-                        slot_mapping=slot_mapping,
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                    )
+            out = super().forward(
+                super().Input(
+                    input_ids,
+                    position_ids=position_ids,
+                    past_sequence_lengths=past_kv_lengths,
+                    total_sequence_lengths=total_kv_lengths,
+                    input_offsets=input_offsets,
+                    cu_seqlens=cu_seqlens,
+                    block_tables=block_tables,
+                    slot_mapping=slot_mapping,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
                 )
-                .output_ids
+            )
+            return infinicore.Tensor(out.output_ids)
+        except BaseException as e:
+            handle_oom_and_exit(e)
+            raise
+
+    def forward_output(
+        self,
+        input_ids,
+        *,
+        position_ids=None,
+        past_kv_lengths=None,
+        total_kv_lengths=None,
+        input_offsets=None,
+        cu_seqlens=None,
+        block_tables=None,
+        slot_mapping=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+    ):
+        try:
+            input_ids = input_ids._underlying if input_ids is not None else None
+            position_ids = (
+                position_ids._underlying if position_ids is not None else None
+            )
+            past_kv_lengths = (
+                past_kv_lengths._underlying if past_kv_lengths is not None else None
+            )
+            total_kv_lengths = (
+                total_kv_lengths._underlying if total_kv_lengths is not None else None
+            )
+            input_offsets = (
+                input_offsets._underlying if input_offsets is not None else None
+            )
+            block_tables = (
+                block_tables._underlying if block_tables is not None else None
+            )
+            cu_seqlens = cu_seqlens._underlying if cu_seqlens is not None else None
+            slot_mapping = (
+                slot_mapping._underlying if slot_mapping is not None else None
+            )
+
+            return super().forward(
+                super().Input(
+                    input_ids,
+                    position_ids=position_ids,
+                    past_sequence_lengths=past_kv_lengths,
+                    total_sequence_lengths=total_kv_lengths,
+                    input_offsets=input_offsets,
+                    cu_seqlens=cu_seqlens,
+                    block_tables=block_tables,
+                    slot_mapping=slot_mapping,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
             )
         except BaseException as e:
             handle_oom_and_exit(e)
@@ -127,6 +180,7 @@ class InferEngine(_infinilm.InferEngine):
         generation_config,
         *,
         _measure_and_log_time=False,
+        _return_time_measurements: bool = False,
     ):
         if generation_config.eos_token_id is None:
             eos_token_id = self.config.eos_token_id
@@ -146,6 +200,10 @@ class InferEngine(_infinilm.InferEngine):
 
         if _measure_and_log_time:
             time_measurements = []
+            cpu_prep_s = []
+            gpu_forward_ms = []
+            gpu_sampling_ms = []
+            gpu_d2h_ms = []
 
         block_tables = None
         max_blocks_per_batch = 0
@@ -169,6 +227,9 @@ class InferEngine(_infinilm.InferEngine):
                 start_time = time.perf_counter()
 
             batch_size, seq_len = input_ids.shape[:2]
+
+            if _measure_and_log_time:
+                t_prep0 = time.perf_counter()
 
             if self.enable_paged_attn:
                 input_ids = input_ids.view([1, batch_size * seq_len])
@@ -227,7 +288,10 @@ class InferEngine(_infinilm.InferEngine):
                 [seq_len * i for i in range(batch_size + 1)], dtype=infinicore.int32
             )
 
-            output_id = self(
+            if _measure_and_log_time:
+                cpu_prep_s.append(time.perf_counter() - t_prep0)
+
+            out = self.forward_output(
                 input_ids=input_ids,
                 position_ids=position_ids,
                 past_kv_lengths=past_kv_lengths,
@@ -240,6 +304,12 @@ class InferEngine(_infinilm.InferEngine):
                 top_k=generation_config.top_k,
                 top_p=generation_config.top_p,
             )
+
+            output_id = infinicore.Tensor(out.output_ids)
+            if _measure_and_log_time:
+                gpu_forward_ms.append(float(getattr(out, "gpu_forward_ms", 0.0)))
+                gpu_sampling_ms.append(float(getattr(out, "gpu_sampling_ms", 0.0)))
+                gpu_d2h_ms.append(float(getattr(out, "gpu_d2h_ms", 0.0)))
 
             output_ids.append(output_id)
 
@@ -275,6 +345,27 @@ class InferEngine(_infinilm.InferEngine):
                 print(
                     f" Decode  Avg ITL: {round(sum(time_measurements[1:]) * 1000 / (len(time_measurements) - 1), 2)} ms   Throughput: {round((initial_batch_size * (len(time_measurements) - 1)) / sum(time_measurements[1:]), 2)} tok/s\n",
                 )
+
+            # Optional breakdown printout (enabled via env var, requires C++ worker timing).
+            if cpu_prep_s:
+                import os
+
+                if os.getenv("INFINILM_PROFILE_STEP_BREAKDOWN") is not None:
+                    n = len(time_measurements)
+                    cpu_ms = [v * 1000.0 for v in cpu_prep_s]
+                    print(" Per-step breakdown (ms):")
+                    for i in range(n):
+                        print(
+                            f"  step={i:4d} cpu_prep={cpu_ms[i]:7.3f} "
+                            f"gpu_fwd={gpu_forward_ms[i]:7.3f} gpu_samp={gpu_sampling_ms[i]:7.3f} gpu_d2h={gpu_d2h_ms[i]:7.3f}"
+                        )
+
+        if _return_time_measurements:
+            if not _measure_and_log_time:
+                raise ValueError(
+                    "`_return_time_measurements=True` requires `_measure_and_log_time=True`."
+                )
+            return output_ids, time_measurements
 
         return output_ids
 
