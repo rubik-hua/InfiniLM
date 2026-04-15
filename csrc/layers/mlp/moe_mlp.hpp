@@ -23,8 +23,7 @@ public:
     size_t moe_intermediate_size() const { return moe_intermediate_size_; }
 
 protected:
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ColumnParallelLinear, gate_proj);
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ColumnParallelLinear, up_proj);
+    INFINICORE_NN_MODULE(infinilm::layers::linear::GateUpParallelLinear, gate_up_proj);
     INFINICORE_NN_MODULE(infinilm::layers::linear::RowParallelLinear, down_proj);
 
     size_t hidden_size_;

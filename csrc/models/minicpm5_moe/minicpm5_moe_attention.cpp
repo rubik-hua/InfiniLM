@@ -7,6 +7,7 @@
 #include "infinicore/ops/sigmoid.hpp"
 
 #include <stdexcept>
+#include <tuple>
 
 namespace infinilm::models::minicpm5_moe {
 
@@ -37,16 +38,15 @@ MiniCPM5MoeAttention::MiniCPM5MoeAttention(std::shared_ptr<infinilm::config::Mod
     num_attention_heads_ = total_num_heads / static_cast<size_t>(tp_size);
     num_key_value_heads_ = total_num_kv_heads / static_cast<size_t>(tp_size);
 
-    // HF parity:
-    // - gated attention doubles q_proj output dim (query + gate).
-    const size_t q_out_dim = (use_gated_attention_ ? 2 : 1) * total_num_heads * head_dim_;
-
-    INFINICORE_NN_MODULE_INIT(q_proj, hidden_size_, q_out_dim, quantization_method,
-                              use_bias, dtype, device, tp_rank, tp_size);
-    INFINICORE_NN_MODULE_INIT(k_proj, hidden_size_, total_num_kv_heads * head_dim_, quantization_method,
-                              use_bias, dtype, device, tp_rank, tp_size);
-    INFINICORE_NN_MODULE_INIT(v_proj, hidden_size_, total_num_kv_heads * head_dim_, quantization_method,
-                              use_bias, dtype, device, tp_rank, tp_size);
+    // HF parity: fused QKV uses one GEMM (reduces decode launch count vs separate q/k/v linears).
+    if (use_gated_attention_) {
+        INFINILM_QKV_LINEAR_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, 2 * head_dim_, head_dim_, head_dim_,
+                                 total_num_heads, total_num_kv_heads, total_num_kv_heads, use_bias, use_bias, use_bias,
+                                 quantization_method, dtype, device, rank_info);
+    } else {
+        INFINILM_QKV_LINEAR_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads,
+                                 quantization_method, use_bias, dtype, device, rank_info);
+    }
     INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method,
                               use_output_bias, dtype, device, tp_rank, tp_size, rank_info.comm);
 
@@ -84,10 +84,7 @@ infinicore::Tensor MiniCPM5MoeAttention::forward(const infinicore::Tensor &posit
     if (::infinilm::backends::AttentionBackend::STATIC_ATTN == attention_backend_) {
         auto hidden_states_mutable = hidden_states;
 
-        // Project Q (and gate), K, V.
-        auto qg = q_proj_->forward(hidden_states_mutable);
-        auto k = k_proj_->forward(hidden_states_mutable);
-        auto v = v_proj_->forward(hidden_states_mutable);
+        auto [qg, k, v] = qkv_proj_->forward_split(hidden_states_mutable);
 
         // Normalize projection outputs to 3D [B,S,dim] (linear kernels may flatten to 2D).
         const size_t q_local_dim = (use_gated_attention_ ? 2 : 1) * num_attention_heads_ * head_dim_;
@@ -158,9 +155,7 @@ infinicore::Tensor MiniCPM5MoeAttention::forward(const infinicore::Tensor &posit
     }
 
     auto hidden_states_mutable = hidden_states;
-    auto qg = q_proj_->forward(hidden_states_mutable);
-    auto k = k_proj_->forward(hidden_states_mutable);
-    auto v = v_proj_->forward(hidden_states_mutable);
+    auto [qg, k, v] = qkv_proj_->forward_split(hidden_states_mutable);
 
     const size_t q_local_dim = (use_gated_attention_ ? 2 : 1) * num_attention_heads_ * head_dim_;
     const size_t kv_local_dim = num_key_value_heads_ * head_dim_;

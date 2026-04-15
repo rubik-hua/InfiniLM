@@ -2,6 +2,7 @@
 
 #include "../../backends/attention_backends.hpp"
 #include "../../layers/common_modules.hpp"
+#include "../../layers/linear/fused_linear.hpp"
 
 namespace infinilm::models::minicpm5_moe {
 
@@ -24,9 +25,7 @@ public:
     size_t layer_idx() const { return layer_idx_; }
 
 protected:
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ColumnParallelLinear, q_proj);
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ColumnParallelLinear, k_proj);
-    INFINICORE_NN_MODULE(infinilm::layers::linear::ColumnParallelLinear, v_proj);
+    INFINICORE_NN_MODULE(infinilm::layers::linear::QKVParallelLinear, qkv_proj);
     INFINICORE_NN_MODULE(infinilm::layers::linear::RowParallelLinear, o_proj);
 
     size_t layer_idx_;

@@ -436,9 +436,8 @@ void RankWorker::thread_loop() {
                                 infinicore::context::recordEvent(ev_d2h_end, stream);
                             }
 
-                            infinicore::context::syncStream();
-
                             if (enable_step_timing) {
+                                // Host-visible boundary: only block until D2H completes (no full stream sync).
                                 infinicore::context::synchronizeEvent(ev_d2h_end);
                                 if (ev_fwd_start != nullptr && ev_fwd_end != nullptr) {
                                     fwd_ms = infinicore::context::elapsedTime(ev_fwd_start, ev_fwd_end);
@@ -449,6 +448,13 @@ void RankWorker::thread_loop() {
                                 if (ev_d2h_start != nullptr && ev_d2h_end != nullptr) {
                                     d2h_ms = infinicore::context::elapsedTime(ev_d2h_start, ev_d2h_end);
                                 }
+                            } else {
+                                // Host-visible boundary: ensure D2H is complete before publishing output_.
+                                // Use an event wait instead of synchronizing the entire stream.
+                                auto ev_ready = infinicore::context::createEvent();
+                                infinicore::context::recordEvent(ev_ready, stream);
+                                infinicore::context::synchronizeEvent(ev_ready);
+                                infinicore::context::destroyEvent(ev_ready);
                             }
 
                             auto out{Output{output_ids, last_logits, fwd_ms, samp_ms, d2h_ms}};

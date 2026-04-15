@@ -1,6 +1,9 @@
 #include "moe_mlp.hpp"
 #include "../../global_state/global_state.hpp"
+#include "../../layers/linear/fused_linear.hpp"
 #include "infinicore/ops.hpp"
+
+#include <tuple>
 
 namespace infinilm::layers::moe_mlp {
 
@@ -25,12 +28,10 @@ MoeMLP::MoeMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
     auto quantization_method = model_config->get_quantization_method();
     switch (quant_scheme) {
     case infinicore::quantization::QuantScheme::NONE: {
-        INFINICORE_NN_MODULE_INIT(gate_proj, hidden_size_, moe_intermediate_size_, false,
-                                  dtype, device, tp_rank, tp_size);
-        INFINICORE_NN_MODULE_INIT(up_proj, hidden_size_, moe_intermediate_size_, false,
-                                  dtype, device, tp_rank, tp_size);
-        INFINICORE_NN_MODULE_INIT(down_proj, moe_intermediate_size_, hidden_size_, false,
-                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+        INFINILM_GATE_UP_LINEAR_INIT(gate_up_proj, "gate_proj", "up_proj", hidden_size_, moe_intermediate_size_, quantization_method,
+                                     use_bias_, dtype, device, rank_info);
+        INFINICORE_NN_MODULE_INIT(down_proj, moe_intermediate_size_, hidden_size_, quantization_method,
+                                  use_bias_, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
     default: {
@@ -42,10 +43,16 @@ MoeMLP::MoeMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
 
 infinicore::Tensor MoeMLP::forward(const infinicore::Tensor &hidden_states) const {
     auto hidden_states_mutable = hidden_states;
-    auto gate = gate_proj_->forward(hidden_states_mutable);
-    auto up = up_proj_->forward(hidden_states_mutable);
+    const bool was_2d = hidden_states_mutable->ndim() == 2;
+    if (was_2d) {
+        hidden_states_mutable = hidden_states_mutable->unsqueeze(0);
+    }
+    auto [gate, up] = gate_up_proj_->forward_split(hidden_states_mutable);
     auto intermediate = infinicore::op::swiglu(up, gate);
     auto output = down_proj_->forward(intermediate);
+    if (was_2d && output->ndim() == 3 && output->shape()[0] == 1) {
+        output = output->squeeze(0);
+    }
     return output;
 }
 } // namespace infinilm::layers::moe_mlp
