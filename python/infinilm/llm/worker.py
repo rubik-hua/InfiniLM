@@ -55,11 +55,6 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def initialize_cache(self, cache_config: Any) -> None:
-        """Initialize KV cache. (Stage 3)"""
-        raise NotImplementedError
-
-    @abstractmethod
     def execute_model(self, scheduler_output: Any) -> Optional[List[int]]:
         """Execute model inference for the given scheduler output.
 
@@ -170,10 +165,13 @@ class Worker(WorkerBase):
         """Return the model configuration from ModelRunner → InferEngine."""
         return self.model_runner.model_config
 
-    @property
-    def kv_connector(self):
-        """Return the KV connector from ModelRunner."""
-        return self.model_runner.kv_connector
+    def get_kv_connector_handshake_metadata(self):
+        """Get KV connector metadata from this worker if available."""
+
+        # TODO: Mooncake: 握手数据
+        # self.model_runner.kv_connector.get_kv_connector_handshake_metadata()
+
+        return {}
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -181,6 +179,7 @@ class Worker(WorkerBase):
 
     def close(self) -> None:
         """Release resources held by the KV connector."""
+        # TODO: Mooncake: shutdown mooncake
         if self.model_runner is not None and self.model_runner.kv_connector is not None:
             self.model_runner.kv_connector.close()
             logger.info("Worker: KV connector closed")

@@ -93,22 +93,46 @@ class KVConnectorModelRunnerMixin:
             yield None
             return
 
-        # 1. Metadata
-        metadata = self.kv_connector.get_connector_metadata(scheduler_output)
-        self.kv_connector.bind_connector_metadata(metadata)
+        # 1. TODO: Mooncake: Metadata
+        assert scheduler_output.kv_connector_metadata is not None
+
+        self.kv_connector.bind_connector_metadata(
+            scheduler_output.kv_connector_metadata
+        )
 
         # 2. Pre-forward: start loading KV caches (receiver / decode side)
-        self.kv_connector.start_load_kv(scheduler_output)
+        # TODO: Mooncake: 从mooncake拉取数据
+        # self.kv_connector.start_load_kv(scheduler_output)
 
         try:
-            yield metadata
+            # forward 操作
+            yield None
         finally:
+            pass
+
             # 3. Post-forward: wait for all saves (sender / prefill side)
-            self.kv_connector.wait_for_save()
+            # TODO: Mooncake: 等待存取数据
+            # self.kv_connector.wait_for_save()
+
+            # TODO: Mooncake: 调用 get_finished
+            # kv_connector.get_finished()
+
+            # TODO: Mooncake: 调用 get_kv_connector_stats
+            # kv_connector.get_kv_connector_stats()
+
+            # TODO: Mooncake: 调用 get_kv_connector_kv_cache_events
+            # kv_connector.get_kv_connector_kv_cache_events()
+
+            # TODO: Mooncake: 调用 build_connector_worker_meta
+            # kv_connector.build_connector_worker_meta()
+
+            # TODO: Mooncake: 调用 clear_connector_metadata
+            # kv_connector.clear_connector_metadata()
 
             # 4. Finalize
-            if not defer_finalize:
-                self.kv_connector.finalize(scheduler_output)
+            # TODO: Mooncake:
+            # if not defer_finalize:
+            #     self.kv_connector.finalize(scheduler_output)
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +232,14 @@ class ModelRunner(KVConnectorModelRunnerMixin):
             role=self.config.kv_connector_role,
             **self.config.kv_connector_kwargs,
         )
+
+        # TODO: Mooncake: 注册kvcache
+        kv_cache_list = self.model_engine.get_kv_cache()
+        for kv_cache_vec in kv_cache_list:  # per rank kv cache
+            for layer_kv in kv_cache_vec:  # per layer kv cache
+                # print(layer_kv.shape)  # [2, 8, 8, 256, 128]
+                pass
+        # self.kv_connector.register_kv_cache()
 
     # ------------------------------------------------------------------
     # Model config access
