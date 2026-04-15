@@ -60,9 +60,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_model(
-        self, scheduler_output: Any
-    ) -> Optional[List[int]]:
+    def execute_model(self, scheduler_output: Any) -> Optional[List[int]]:
         """Execute model inference for the given scheduler output.
 
         Args:
@@ -148,24 +146,11 @@ class Worker(WorkerBase):
         self.model_runner.load_model(self.device)
         logger.info("Worker: model loaded")
 
-    def initialize_cache(self, cache_config: Any) -> None:
-        """Initialize KV cache via ModelRunner. (Stage 3)
-
-        Corresponds to ``GPUWorker.initialize_cache()`` in vLLM v1.
-
-        Args:
-            cache_config: A ``PagedKVCacheConfig`` or ``StaticKVCacheConfig``.
-        """
-        self.model_runner.initialize_cache(cache_config)
-        logger.info(f"Worker: KV cache initialized ({type(cache_config).__name__})")
-
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
 
-    def execute_model(
-        self, scheduler_output: Any
-    ) -> Optional[List[int]]:
+    def execute_model(self, scheduler_output: Any) -> Optional[List[int]]:
         """Execute model inference using the model runner.
 
         Args:
@@ -196,22 +181,16 @@ class Worker(WorkerBase):
 
     def close(self) -> None:
         """Release resources held by the KV connector."""
-        if (
-            self.model_runner is not None
-            and self.model_runner.kv_connector is not None
-        ):
+        if self.model_runner is not None and self.model_runner.kv_connector is not None:
             self.model_runner.kv_connector.close()
             logger.info("Worker: KV connector closed")
 
 
 def create_worker(config: EngineConfig) -> Worker:
     """创建 Worker。
-    
     不再根据 role 选择不同子类——
     PD 差异由 KVConnector role 处理。
     """
     worker = Worker(config)
-    logger.info(
-        f"Created Worker (kv_connector_role={config.kv_connector_role})"
-    )
+    logger.info(f"Created Worker (kv_connector_role={config.kv_connector_role})")
     return worker

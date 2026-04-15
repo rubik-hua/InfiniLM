@@ -44,6 +44,7 @@ from infinilm.llm.kv_connector import create_kv_connector
 from infinilm.distributed import DistConfig
 from infinilm.infer_engine import InferEngine
 from infinilm.modeling_utils import load_model_state_dict_by_file
+from infinilm.cache.cache import PagedKVCacheConfig, StaticKVCacheConfig
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,7 @@ class KVConnectorModelRunnerMixin:
             ``KVConnectorMetadata`` or ``None`` when no active connector.
         """
         # Fast path — no connector or NullKVConnector
-        if self.kv_connector is None or isinstance(
-            self.kv_connector, NullKVConnector
-        ):
+        if self.kv_connector is None or isinstance(self.kv_connector, NullKVConnector):
             yield None
             return
 
@@ -158,10 +157,26 @@ class ModelRunner(KVConnectorModelRunnerMixin):
             device: The infinicore device object to load the model onto.
         """
         # 1. Create InferEngine
+        if self.config.cache_type == "static":
+            cache_config = StaticKVCacheConfig(
+                max_batch_size=1, max_cache_len=self.config.max_cache_len
+            )
+        elif self.config.cache_type == "paged":
+            cache_config = PagedKVCacheConfig(
+                num_blocks=self.config.num_blocks, block_size=self.config.block_size
+            )
+        else:
+            raise ValueError(f"Unsupported cache_type: {self.config.cache_type}")
+
+        logger.info(
+            f"ModelRunner: KV cache initialized ({type(cache_config).__name__})"
+        )
+
         self.model_engine = InferEngine(
             model_path=self.config.model_path,
             device=device,
             distributed_config=DistConfig(self.config.tensor_parallel_size),
+            cache_config=cache_config,
             enable_graph_compiling=self.config.enable_graph,
             attention_backend=self.config.attn_backend,
         )
@@ -193,21 +208,6 @@ class ModelRunner(KVConnectorModelRunnerMixin):
             role=self.config.kv_connector_role,
             **self.config.kv_connector_kwargs,
         )
-
-    def initialize_cache(self, cache_config: Any) -> None:
-        """Initialize KV cache on the model engine.
-
-        This corresponds to ``GPUModelRunner.initialize_kv_cache()``
-        in vLLM v1.
-
-        Args:
-            cache_config: A ``PagedKVCacheConfig`` or ``StaticKVCacheConfig``.
-        """
-        if self.model_engine is None:
-            raise RuntimeError(
-                "ModelRunner.load_model() must be called before initialize_cache()"
-            )
-        self.model_engine.reset_cache(cache_config)
 
     # ------------------------------------------------------------------
     # Model config access
@@ -298,9 +298,7 @@ class ModelRunner(KVConnectorModelRunnerMixin):
             if value is None:
                 model_input[key] = None
             elif key in ["input_ids", "position_ids", "slot_mapping"]:
-                model_input[key] = infinicore.from_list(
-                    value, dtype=infinicore.int64
-                )
+                model_input[key] = infinicore.from_list(value, dtype=infinicore.int64)
             elif key in [
                 "past_kv_lengths",
                 "total_kv_lengths",
@@ -308,9 +306,7 @@ class ModelRunner(KVConnectorModelRunnerMixin):
                 "cu_seqlens",
                 "block_tables",
             ]:
-                model_input[key] = infinicore.from_list(
-                    value, dtype=infinicore.int32
-                )
+                model_input[key] = infinicore.from_list(value, dtype=infinicore.int32)
             else:
                 model_input[key] = value
         return model_input

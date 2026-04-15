@@ -27,11 +27,8 @@ from infinilm.llm.sampling_params import SamplingParams
 from infinilm.llm.scheduler import Scheduler
 from infinilm.llm.static_scheduler import StaticScheduler
 from infinilm.llm.worker import Worker, create_worker
-from infinilm.cache.cache import PagedKVCacheConfig, StaticKVCacheConfig
 
 logger = logging.getLogger(__name__)
-
-
 
 
 class LLMEngine:
@@ -60,11 +57,8 @@ class LLMEngine:
         self._fix_tokenizer_decoder()
 
         # ==============================================================
-        # Initialize KV cache + Scheduler
+        #  Scheduler
         # ==============================================================
-        cache_config = self._create_cache_config(config)
-        self.worker.initialize_cache(cache_config)
-
         if config.cache_type == "static":
             self.scheduler = StaticScheduler(max_cache_len=config.max_cache_len)
             logger.info(
@@ -98,22 +92,8 @@ class LLMEngine:
         )
 
     # ------------------------------------------------------------------
-    # Cache / tokenizer helpers
+    # tokenizer helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _create_cache_config(config: EngineConfig):
-        """Create cache configuration based on engine config."""
-        if config.cache_type == "static":
-            return StaticKVCacheConfig(
-                max_batch_size=1, max_cache_len=config.max_cache_len
-            )
-        elif config.cache_type == "paged":
-            return PagedKVCacheConfig(
-                num_blocks=config.num_blocks, block_size=config.block_size
-            )
-        else:
-            raise ValueError(f"Unsupported cache_type: {config.cache_type}")
 
     def _fix_tokenizer_decoder(self):
         """Fix tokenizer decoder for llama models."""
@@ -748,7 +728,5 @@ class AsyncLLMEngine:
                     break
                 continue
             except Exception as e:
-                logger.error(
-                    f"Error while streaming request {request.request_id}: {e}"
-                )
+                logger.error(f"Error while streaming request {request.request_id}: {e}")
                 break
