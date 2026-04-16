@@ -106,8 +106,9 @@ struct Qwen3vlModel
 {
     Qwen3vlModel(const Qwen3vlMeta *meta, const Qwen3vlWeights *weights);
 
-    // Expose ndev for C API functions that need to set Qwen3vlInferState::sync_cnt
-    int ndev() const { return static_cast<int>(dev_ids_.size()); }
+    // See JiugeModel::~JiugeModel: shutdown() must run before the base
+    // destructor to keep the derived vtable alive for releaseDeviceResource.
+    ~Qwen3vlModel() override { shutdown(); }
 
 protected:
     void createDeviceResource(Qwen3vlDeviceResource *rsrc,

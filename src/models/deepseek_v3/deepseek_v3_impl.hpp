@@ -77,6 +77,10 @@ struct DeepSeekV3Model
 {
     DeepSeekV3Model(const DeepSeekV3Meta *meta, const DeepSeekV3Weights *weights);
 
+    // See JiugeModel::~JiugeModel: shutdown() must run before the base
+    // destructor to keep the derived vtable alive for releaseDeviceResource.
+    ~DeepSeekV3Model() override { shutdown(); }
+
 protected:
     void createDeviceResource(DeepSeekV3DeviceResource *rsrc,
                               int idev, int ndev,

@@ -36,6 +36,10 @@ struct GPTQDeviceResource : public DeviceResourceBase {
 struct JiugeGPTQModel : public ModelBase<JiugeGPTQMeta, GPTQDeviceResource> {
     JiugeGPTQModel(const JiugeGPTQMeta *meta, const ModelWeights *weights);
 
+    // See JiugeModel::~JiugeModel: shutdown() must run before the base
+    // destructor to keep the derived vtable alive for releaseDeviceResource.
+    ~JiugeGPTQModel() override { shutdown(); }
+
 protected:
     void createDeviceResource(GPTQDeviceResource *rsrc,
                               int idev, int ndev,

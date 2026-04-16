@@ -25,6 +25,11 @@ struct JiugeModel : public ModelBase<JiugeMeta, JiugeDeviceResource> {
     JiugeModel(const JiugeMeta *meta, const JiugeWeights *weights,
                infiniDevice_t device, std::vector<int> dev_ids);
 
+    // Stop worker threads while the derived vtable is still live so
+    // releaseDeviceResource() dispatches correctly. ~ModelBase intentionally
+    // does not call shutdown() to avoid a pure-virtual call.
+    ~JiugeModel() override { shutdown(); }
+
 protected:
     void createDeviceResource(JiugeDeviceResource *rsrc,
                               int idev, int ndev,

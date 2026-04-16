@@ -6,7 +6,9 @@
 #include "infinicore_infer.h"
 
 #include <condition_variable>
+#include <exception>
 #include <mutex>
+#include <spdlog/spdlog.h>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -96,9 +98,28 @@ public:
         threads_.resize(ndev);
     }
 
-    // Joining threads in shutdown() requires the model to still be alive.
-    // Subclasses must NOT call shutdown() themselves; the destructor does it.
-    virtual ~ModelBase() { shutdown(); }
+    // ~ModelBase intentionally does NOT call shutdown(): by the time this
+    // destructor runs, the derived vtable has already been reset to ModelBase
+    // (C++ [class.cdtor]/4), so the pure-virtual releaseDeviceResource()
+    // called from threadLoop would abort via __cxa_pure_virtual.
+    //
+    // Each subclass MUST call shutdown() from its own destructor — while the
+    // derived vtable is still live — before the base subobject is destroyed.
+    // A debug build-time check fires if the subclass forgot.
+    virtual ~ModelBase() {
+        for (const auto &t : threads_) {
+            if (t.joinable()) {
+                // A live worker thread here means the subclass skipped
+                // shutdown() in its destructor. We can't safely join it now
+                // because the derived vtable is gone; log and terminate
+                // instead of risking a pure-virtual crash mid-release.
+                spdlog::error("ModelBase::~ModelBase(): subclass failed to call "
+                              "shutdown() before destruction. Aborting to avoid "
+                              "pure-virtual call in the worker thread.");
+                std::terminate();
+            }
+        }
+    }
 
     ModelBase(const ModelBase &)            = delete;
     ModelBase &operator=(const ModelBase &) = delete;
@@ -168,7 +189,11 @@ protected:
         }
     }
 
-    // Signal all threads to stop and join them.
+    // Signal all threads to stop and join them. Idempotent — calling shutdown()
+    // a second time is a no-op because the joinable() check skips threads that
+    // have already been joined. Subclass destructors must call this while the
+    // derived vtable is still live so threadLoop's releaseDeviceResource()
+    // virtual call dispatches to the derived override.
     void shutdown() {
         int ndev = static_cast<int>(dev_ids_.size());
         for (int idev = 0; idev < ndev; idev++) {

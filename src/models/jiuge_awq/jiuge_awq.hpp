@@ -36,6 +36,10 @@ struct AWQDeviceResource : public DeviceResourceBase {
 struct JiugeAWQModel : public ModelBase<JiugeAWQMeta, AWQDeviceResource> {
     JiugeAWQModel(const JiugeAWQMeta *meta, const ModelWeights *weights);
 
+    // See JiugeModel::~JiugeModel: shutdown() must run before the base
+    // destructor to keep the derived vtable alive for releaseDeviceResource.
+    ~JiugeAWQModel() override { shutdown(); }
+
 protected:
     void createDeviceResource(AWQDeviceResource *rsrc,
                               int idev, int ndev,
