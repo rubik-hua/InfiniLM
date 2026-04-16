@@ -26,7 +26,7 @@ from infinilm.llm.request import (
 from infinilm.llm.sampling_params import SamplingParams
 from infinilm.llm.scheduler import Scheduler
 from infinilm.llm.static_scheduler import StaticScheduler
-from infinilm.llm.worker import Worker, create_worker
+from infinilm.llm.worker import create_worker
 
 logger = logging.getLogger(__name__)
 

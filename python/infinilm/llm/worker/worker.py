@@ -25,7 +25,7 @@ from typing import Any, List, Optional
 import infinicore
 
 from infinilm.llm.engine_config import EngineConfig
-from infinilm.llm.model_runner import ModelRunner
+from infinilm.llm.worker.model_runner import ModelRunner
 from infinilm.llm.kv_connector import KVConnectorRole
 from infinilm.cache.cache import PagedKVCacheConfig, StaticKVCacheConfig
 
@@ -169,9 +169,7 @@ class Worker(WorkerBase):
         """Get KV connector metadata from this worker if available."""
 
         # TODO: Mooncake: 握手数据
-        # self.model_runner.kv_connector.get_kv_connector_handshake_metadata()
-
-        return {}
+        return self.model_runner.kv_connector.get_kv_connector_handshake_metadata()
 
     # ------------------------------------------------------------------
     # Cleanup

@@ -27,35 +27,47 @@ from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from sympy import im
+import enum
 
+logger = logging.getLogger(__name__)
+import infinicore
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class KVConnectorMetadata:
-    """Metadata for KV connector operations during a forward pass.
+# @dataclass
+# class KVConnectorMetadata:
+#     """Metadata for KV connector operations during a forward pass.
 
-    This metadata is generated per scheduler step and carries information
-    needed by the KV connector to manage KV cache transfers.
+#     This metadata is generated per scheduler step and carries information
+#     needed by the KV connector to manage KV cache transfers.
 
-    Attributes:
-        request_ids: List of request IDs in the current batch.
-        is_prefill: Whether the current step is a prefill step.
-        kv_cache_spec: Optional specification of the KV cache layout
-            (num_layers, num_heads, head_dim, dtype, …).
-        block_tables: Optional per-request block tables for paged KV cache.
-        extra: Additional connector-specific metadata.
+#     Attributes:
+#         request_ids: List of request IDs in the current batch.
+#         is_prefill: Whether the current step is a prefill step.
+#         kv_cache_spec: Optional specification of the KV cache layout
+#             (num_layers, num_heads, head_dim, dtype, …).
+#         block_tables: Optional per-request block tables for paged KV cache.
+#         extra: Additional connector-specific metadata.
+#     """
+
+#     request_ids: List[str] = field(default_factory=list)
+#     is_prefill: bool = False
+#     kv_cache_spec: Optional[Dict[str, Any]] = None
+#     block_tables: Optional[Any] = None
+#     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+class KVConnectorMetadata(ABC):  # noqa: B024
+    """
+    Abstract Metadata used to communicate
+    Scheduler KVConnector -> Worker KVConnector.
     """
 
-    request_ids: List[str] = field(default_factory=list)
-    is_prefill: bool = False
-    kv_cache_spec: Optional[Dict[str, Any]] = None
-    block_tables: Optional[Any] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -63,13 +75,14 @@ class KVConnectorMetadata:
 # ---------------------------------------------------------------------------
 
 
-class KVConnectorRole:
-    """Roles for KV connector in PD separation."""
+class KVConnectorRole(enum.Enum):
+    NONE = -1  # 测试使用，会删除
 
-    NONE = "none"  # No PD separation (standalone)
-    SENDER = "sender"  # Prefill worker: computes and sends KV
-    RECEIVER = "receiver"  # Decode worker: receives KV
-    BOTH = "both"  # Both sender and receiver (for testing / pipeline)
+    # Connector running in the scheduler process
+    SCHEDULER = 0
+
+    # Connector running in the worker process
+    WORKER = 1
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +106,27 @@ class KVConnectorBase(ABC):
 
     # ------ metadata -------------------------------------------------------
 
-    def get_connector_metadata(
-        self, scheduler_output: Any
-    ) -> Optional[KVConnectorMetadata]:
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        """Set the connector metadata from the scheduler.
+
+        This function should be called by the model runner every time
+        before the model execution. The metadata will be used for runtime
+        KV cache loading and saving.
+
+        Args:
+            connector_metadata (dict): the connector metadata.
+        """
+        self._connector_metadata = connector_metadata
+
+    def clear_connector_metadata(self) -> None:
+        """Clear the connector metadata.
+
+        This function should be called by the model runner every time
+        after the model execution.
+        """
+        self._connector_metadata = None
+
+    def _get_connector_metadata(self) -> Optional[KVConnectorMetadata]:
         """Extract connector metadata from scheduler output.
 
         Called before each forward pass.
@@ -106,24 +137,32 @@ class KVConnectorBase(ABC):
         Returns:
             KVConnectorMetadata, or None if no metadata is needed.
         """
-        return None
 
-    def bind_connector_metadata(
-        self, metadata: Optional[KVConnectorMetadata]
-    ) -> None:
-        """Bind connector metadata for the current forward pass.
+        # Should only be called while set to valid metadata.
+        assert self._connector_metadata is not None
+        return self._connector_metadata
 
-        Makes the metadata available during the forward pass so that
-        layer-level hooks can access it.
+    def has_connector_metadata(self) -> bool:
+        """Check whether the connector metadata is currently set.
+
+        Returns:
+            bool: True if connector metadata exists, False otherwise.
+        """
+        return self._connector_metadata is not None
+
+    def register_kv_caches(self, kv_caches: dict[str, infinicore.Tensor]):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
 
         Args:
-            metadata: The connector metadata to bind.
+            kv_caches: dictionary of layer names, kv cache
         """
-        pass
+        return
 
     # ------ receiver (decode side) -----------------------------------------
 
-    def start_load_kv(self, scheduler_output: Any, **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading KV caches for the current batch.
 
         Called *before* the model forward pass on the decode (receiver) side.
@@ -134,7 +173,7 @@ class KVConnectorBase(ABC):
         """
         pass
 
-    def wait_for_layer_load(self, layer_idx: int) -> None:
+    def wait_for_layer_load(self, layer_name: str) -> None:
         """Wait for a specific layer's KV cache to finish loading.
 
         Called during the model forward pass on the decode (receiver) side,
@@ -145,10 +184,12 @@ class KVConnectorBase(ABC):
         """
         pass
 
-    # ------ sender (prefill side) ------------------------------------------
-
     def save_kv_layer(
-        self, layer_idx: int, kv_cache: Any, **kwargs
+        self,
+        layer_name: str,
+        kv_layer: infinicore.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs: Any,
     ) -> None:
         """Save KV cache for a specific layer.
 
