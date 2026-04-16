@@ -1,5 +1,7 @@
 #include "../cache.hpp"
 
+#include <stdexcept>
+
 __INFINI_C struct KVCache *createKVCache(
     size_t nlayers,
     size_t max_len,
@@ -38,6 +40,13 @@ __INFINI_C struct KVCache *duplicateKVCache(const KVCache *kv_cache, size_t seq_
     auto dtype = kv_cache->k[0][0]->dtype();
     auto shape_k = kv_cache->k[0][0]->shape();
     auto shape_v = kv_cache->v[0][0]->shape();
+    // Guard against a caller passing a seq_len that exceeds the source cache's
+    // max_len dimension (shape[0]) — otherwise the memcpy below reads/writes
+    // past the end of both source and destination buffers.
+    if (seq_len > shape_k[0] || seq_len > shape_v[0]) {
+        throw std::invalid_argument(
+            "duplicateKVCache: seq_len exceeds the source cache's max_len");
+    }
     auto size_k = seq_len * shape_k[1] * shape_k[2] * dsize(dtype);
     auto size_v = seq_len * shape_v[1] * shape_v[2] * dsize(dtype);
     KVCache *new_kv_cache = new KVCache();
