@@ -244,11 +244,6 @@ void RankWorker::thread_loop() {
 
             // Create model using factory (may be expensive)
             if (model_config_ == nullptr) {
-                // model_ = InfinilmModelFactory::createModel(
-                //     legacy_model_config_,
-                //     rank_info_,
-                //     pending_cache_config_ != nullptr ? pending_cache_config_.get() : nullptr,
-                //     attention_backend_);
                 throw std::runtime_error("RankWorker::thread_loop(): the way of creating models using LlamaConfig is no longer supported !!!");
             }
 
@@ -261,16 +256,14 @@ void RankWorker::thread_loop() {
                     rank_info_.device,
                     pending_cache_config_ != nullptr ? pending_cache_config_.get() : nullptr);
             } else {
-                std::vector<std::string> classic_models = {"llama", "qwen2", "minicpm", "fm9g", "fm9g7b"};
-                if ((std::find(classic_models.begin(), classic_models.end(), model_type) != classic_models.end())) {
-                    model_ = InfinilmModelFactory::createModel(
-                        model_config_,
-                        rank_info_,
-                        pending_cache_config_ != nullptr ? pending_cache_config_.get() : nullptr,
-                        attention_backend_);
-                } else {
-                    throw std::runtime_error("RankWorker::thread_loop(): Unsupported model config type: " + model_type);
-                }
+                // Fall back to the llama-compatible path; the factory itself
+                // validates the model_type against its internal allow-list and
+                // throws with a descriptive message for unsupported types.
+                model_ = InfinilmModelFactory::createModel(
+                    model_config_,
+                    rank_info_,
+                    pending_cache_config_ != nullptr ? pending_cache_config_.get() : nullptr,
+                    attention_backend_);
             }
 
             if (!model_) {

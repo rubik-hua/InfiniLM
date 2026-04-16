@@ -4,18 +4,8 @@
 #include "models_registry.hpp"
 
 namespace infinilm {
-/**
- * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).
- *
- * ⚠️ DEVELOPMENT POLICY:
- *   - NO new development or feature additions permitted on this interface
- *   - Only critical bug fixes (security/stability) allowed until removal
- *   - All new code MUST migrate to the polymorphic overload below
- *
- * Replacement: Use the polymorphic overload of this same function name with updated signature
- * Reason: Legacy signature lacks support for dynamic quantization modes.
- * Removal target: v0.2.0 (Q2 2026)
- */
+// Deprecated legacy-config overload; removed in v0.2.0. New code must use
+// the ModelConfig-based overloads below.
 std::shared_ptr<InfinilmModel> InfinilmModelFactory::createModel(
     const InfinilmModel::Config &config,
     engine::distributed::RankInfo rank_info,
@@ -48,8 +38,13 @@ std::shared_ptr<InfinilmModel> InfinilmModelFactory::createModel(
         throw std::invalid_argument(
             "InfinilmModelFactory::createModel: 'model_type' field is missing or empty in config");
     }
+    // model_types whose weight layout is compatible with LlamaForCausalLM.
+    // qwen3 is intentionally excluded: it has its own Qwen3ForCausalLM class
+    // (registered via INFINILM_REGISTER_CAUSAL_LM_MODEL) and is handled by the
+    // registry-driven overload below. Only keep entries here that are registered
+    // to fall through to LlamaForCausalLM when USE_CLASSIC_LLAMA is set.
     static const std::unordered_set<std::string> llama_compatible = {
-        "llama", "qwen2", "qwen3", "minicpm", "fm9g", "fm9g7b"
+        "llama", "qwen2", "minicpm", "fm9g", "fm9g7b"
     };
 
     std::shared_ptr<InfinilmModel> model;
@@ -77,11 +72,11 @@ std::shared_ptr<InfinilmModel> InfinilmModelFactory::createModel(
     const auto &model_map = models::get_causal_lm_model_map();
     auto it = model_map.find(model_type);
     if (it != model_map.end()) {
-        // create model
         auto &model_creator = it->second;
         model = model_creator(model_config, device);
     } else {
-        throw std::invalid_argument("InfinilmModelFactory::createModel: Unsupported model_type");
+        throw std::invalid_argument(
+            "InfinilmModelFactory::createModel: Unsupported model_type '" + model_type + "'");
     }
 
     if (cache) {
