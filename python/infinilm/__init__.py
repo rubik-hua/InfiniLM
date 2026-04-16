@@ -1,6 +1,3 @@
-import logging as _logging
-import os as _os
-
 try:
     from .models import AutoLlamaModel
     from . import distributed
@@ -29,18 +26,24 @@ try:
         "RequestOutput",
         "TokenOutput",
     ]
-except (ImportError, TypeError) as _e:
-    # ImportError: C-extensions (infinicore / _infinilm) absent, e.g. in
-    # pure-Python test environments that haven't built the pybind11 module.
-    # TypeError: when _infinilm is replaced by a MagicMock stub, classes that
-    # inherit from both PretrainedConfig and _infinilm.LlamaConfig raise a
-    # metaclass conflict. Always log the failure so production setups get a
-    # diagnostic rather than a silent empty module.
-    _logging.getLogger(__name__).warning(
-        "infinilm top-level imports failed (%s: %s); only subpackages like "
-        "infinilm.utils are available. Set INFINILM_DEBUG=1 for a traceback.",
+except (ImportError, AttributeError, TypeError) as _e:
+    # Recognised failure modes:
+    #   ImportError     — C-extensions (infinicore / _infinilm) absent, e.g.
+    #                     pure-Python test envs that haven't built pybind11.
+    #   AttributeError  — _infinilm loaded but missing expected exports (ABI
+    #                     skew / stale .so); lets us degrade to subpackages
+    #                     instead of failing the whole import.
+    #   TypeError       — only the metaclass conflict triggered when tests
+    #                     replace _infinilm with a MagicMock stub. Any other
+    #                     TypeError is a real bug and must not be swallowed.
+    if isinstance(_e, TypeError) and "metaclass conflict" not in str(_e):
+        raise
+    import logging, os
+    logging.getLogger(__name__).warning(
+        "infinilm top-level exports unavailable (%s: %s); subpackages such as "
+        "infinilm.utils remain importable. Set INFINILM_DEBUG=1 for a traceback.",
         type(_e).__name__,
         _e,
     )
-    if _os.environ.get("INFINILM_DEBUG"):
+    if os.environ.get("INFINILM_DEBUG"):
         raise

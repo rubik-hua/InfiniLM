@@ -41,8 +41,10 @@ __INFINI_C struct KVCache *duplicateKVCache(const KVCache *kv_cache, size_t seq_
     auto shape_k = kv_cache->k[0][0]->shape();
     auto shape_v = kv_cache->v[0][0]->shape();
     // Guard against a caller passing a seq_len that exceeds the source cache's
-    // max_len dimension (shape[0]) — otherwise the memcpy below reads/writes
-    // past the end of both source and destination buffers.
+    // max_len dimension (shape[0]) — otherwise the memcpy below reads past the
+    // end of the source buffer. (The destination buffers are freshly allocated
+    // below using the source shape, so their capacity always matches seq_len
+    // once this check passes.)
     if (seq_len > shape_k[0] || seq_len > shape_v[0]) {
         throw std::invalid_argument(
             "duplicateKVCache: seq_len exceeds the source cache's max_len");
