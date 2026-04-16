@@ -33,10 +33,13 @@ std::shared_ptr<InfinilmModel> InfinilmModelFactory::createModel(
     const cache::CacheConfig *cache,
     backends::AttentionBackend attention_backend) {
 
-    const auto model_type = model_config->get_or<std::string>("model_type", "");
+    // Use get<> rather than get_or<>: the latter's catch-all for
+    // nlohmann::json::type_error degrades a "wrong type" config.json bug
+    // (e.g. "model_type": 42) into a misleading "missing or empty" error.
+    const auto model_type = model_config->get<std::string>("model_type");
     if (model_type.empty()) {
         throw std::invalid_argument(
-            "InfinilmModelFactory::createModel: 'model_type' field is missing or empty in config");
+            "InfinilmModelFactory::createModel: 'model_type' is empty in config");
     }
     // model_types whose weight layout is compatible with LlamaForCausalLM.
     // qwen3 is intentionally excluded: it has its own Qwen3ForCausalLM class
