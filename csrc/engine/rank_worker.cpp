@@ -10,18 +10,9 @@
 
 namespace infinilm::engine {
 
-/**
- * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).
- *
- * ⚠️ DEVELOPMENT POLICY:
- *   - NO new development or feature additions permitted on this interface
- *   - Only critical bug fixes (security/stability) allowed until removal
- *   - All new code MUST migrate to the polymorphic overload below
- *
- * Replacement: Use the polymorphic overload of this same function name with updated signature
- * Reason: Legacy signature lacks support for dynamic quantization modes.
- * Removal target: v0.2.0 (Q2 2026)
- */
+// Legacy LlamaConfig-based ctor; removed in v0.2.0. thread_loop throws
+// immediately because legacy_model_config_ is unsupported, so this path
+// surfaces via the should_exit_ branch of the wait predicate below.
 RankWorker::RankWorker(const InfinilmModel::Config &model_config,
                        const distributed::RankInfo &rank_info,
                        const cache::CacheConfig *cache_config,
@@ -45,9 +36,17 @@ RankWorker::RankWorker(const InfinilmModel::Config &model_config,
     // start the thread
     thread_ = std::thread(&RankWorker::thread_loop, this);
 
-    // Wait until the worker thread finishes initialization (model created)
+    // Wait until the worker thread finishes initialization (model created) or
+    // signals a fatal error via should_exit_. Without the should_exit_ branch
+    // a throw inside thread_loop before init_done_=true deadlocks this ctor.
     std::unique_lock<std::mutex> lk(mutex_);
-    cv_.wait(lk, [&] { return init_done_; });
+    cv_.wait(lk, [&] { return init_done_ || should_exit_; });
+    if (should_exit_) {
+        lk.unlock();
+        thread_.join();
+        throw std::runtime_error(
+            "RankWorker initialization failed; see earlier log for details");
+    }
 }
 
 RankWorker::RankWorker(
@@ -74,9 +73,15 @@ RankWorker::RankWorker(
     }
     // start the thread
     thread_ = std::thread(&RankWorker::thread_loop, this);
-    // Wait until the worker thread finishes initialization (model created)
+    // See the legacy ctor above for why should_exit_ is part of the predicate.
     std::unique_lock<std::mutex> lk(mutex_);
-    cv_.wait(lk, [&] { return init_done_; });
+    cv_.wait(lk, [&] { return init_done_ || should_exit_; });
+    if (should_exit_) {
+        lk.unlock();
+        thread_.join();
+        throw std::runtime_error(
+            "RankWorker initialization failed; see earlier log for details");
+    }
 }
 
 std::string RankWorker::info() const {
@@ -449,9 +454,14 @@ void RankWorker::thread_loop() {
         compiler_.reset();
     } catch (const std::exception &e) {
         // Top-level exception: ensure any waiters are woken and the thread exits cleanly.
+        // init_done_ must also be set so the constructor's cv_.wait predicate
+        // resolves; otherwise a throw before initialization finishes would hang
+        // the ctor forever (only should_exit_ was previously set, which did not
+        // satisfy the old predicate that looked solely at init_done_).
         {
             std::lock_guard<std::mutex> lk(mutex_);
             should_exit_ = true;
+            init_done_ = true;
             job_done_ = true;
         }
         cv_.notify_all();
