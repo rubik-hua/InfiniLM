@@ -2,6 +2,7 @@
 KV Connector package for Prefill-Decode disaggregated inference.
 """
 
+from infinilm.llm.engine_config import EngineConfig
 from infinilm.llm.kv_connector.base import (
     KVConnectorBase,
     KVConnectorMetadata,
@@ -18,19 +19,11 @@ __all__ = [
 ]
 
 
-def create_kv_connector(
-    connector_type: str = "null",
-    role: str = KVConnectorRole.NONE,
-    **kwargs,
-) -> KVConnectorBase:
+def create_kv_connector(config: EngineConfig, role: KVConnectorRole) -> KVConnectorBase:
     """Factory function to create KV connectors.
 
     Args:
-        connector_type: Type of connector.
-            - "null": No-op connector (standalone mode, default).
-            - Future: "mooncake", "rdma", "tcp", etc.
-        role: Role of the connector (none/sender/receiver/both).
-        **kwargs: Additional connector-specific arguments.
+        config: EngineConfig containing `kv_transfer_config`.
 
     Returns:
         A KVConnectorBase instance.
@@ -38,14 +31,27 @@ def create_kv_connector(
     Raises:
         ValueError: If connector_type is not recognized.
     """
-    if connector_type is None or connector_type == "null":
-        return NullKVConnector(**kwargs)
-    # ---- Future connector types can be registered here ----
-    # elif connector_type == "mooncake":
-    #     from infinilm.llm.kv_connector.mooncake_connector import MooncakeKVConnector
-    #     return MooncakeKVConnector(role=role, **kwargs)
+    assert config.kv_transfer_config is not None
+
+    kv_transfer_config = config.kv_transfer_config
+
+    assert kv_transfer_config.kv_connector is not None
+    assert kv_transfer_config.kv_role is not None
+
+    kv_connector = kv_transfer_config.kv_connector
+    kv_role = kv_transfer_config.kv_role
+
+    if kv_connector in (None, "", "null"):
+        return NullKVConnector()
+
+    if kv_connector == "MooncakeConnector":
+        from infinilm.llm.kv_connector.mooncake.mooncake_connector import (
+            MooncakeConnector,
+        )
+
+        connector = MooncakeConnector(config, role=role)
     else:
         raise ValueError(
-            f"Unknown KV connector type: '{connector_type}'. "
-            f"Supported types: ['null']"
+            f"Unknown KV connector type: {kv_connector!r}. Supported types: ['null', 'MooncakeConnector']"
         )
+    return connector

@@ -16,7 +16,7 @@ from typing import List, Optional, Union, AsyncIterator
 from transformers import AutoTokenizer
 from tokenizers import decoders as _dec
 
-from infinilm.llm.engine_config import EngineConfig
+from infinilm.llm.engine_config import EngineConfig, KVTransferConfig
 from infinilm.llm.request import (
     InferenceRequest,
     RequestOutput,
@@ -26,7 +26,7 @@ from infinilm.llm.request import (
 from infinilm.llm.sampling_params import SamplingParams
 from infinilm.llm.scheduler import Scheduler
 from infinilm.llm.static_scheduler import StaticScheduler
-from infinilm.llm.worker import create_worker
+from infinilm.llm.worker.worker import Worker
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,17 @@ class LLMEngine:
         # ==============================================================
         # Create Worker
         # ==============================================================
-        self.worker = create_worker(config)
+        self.worker = Worker(config)
+
+        from infinilm.llm.kv_connector import create_kv_connector
+        from infinilm.llm.kv_connector.base import KVConnectorRole
+
+        kv_transfer_config = config.kv_transfer_config
+        self.kv_connector = None
+        if kv_transfer_config is not None:
+            self.kv_connector = create_kv_connector(
+                self.config, role=KVConnectorRole.SCHEDULER
+            )
 
         # ==============================================================
         # Staged initialisation
@@ -87,8 +97,8 @@ class LLMEngine:
             f"LLMEngine initialized with model at {config.model_path} "
             f"on device {config.device}, "
             f"enable_graph={config.enable_graph}, "
-            f"kv_connector={config.kv_connector_type} "
-            f"(role={config.kv_connector_role})"
+            f"kv_connector={getattr(config.kv_transfer_config, 'kv_connector', None)} "
+            f"(role={getattr(config.kv_transfer_config, 'kv_role', None)})"
         )
 
     # ------------------------------------------------------------------
@@ -344,9 +354,6 @@ class LLM:
             top_k=top_k,
             enable_graph=enable_graph,
             attn_backend=attn_backend,
-            kv_connector_type=kv_connector_type,
-            kv_connector_role=kv_connector_role,
-            kv_connector_kwargs=kv_connector_kwargs,
         )
         self.engine = LLMEngine(config)
         self.config = config
@@ -467,9 +474,7 @@ class AsyncLLMEngine:
         top_k: int = 1,
         enable_graph: bool = False,
         attn_backend: str = "default",
-        kv_connector_type: str = "null",
-        kv_connector_role: str = "none",
-        kv_connector_kwargs: Optional[dict] = None,
+        kv_transfer_config: KVTransferConfig | None = None,
     ):
         """Initialize AsyncLLMEngine.
 
@@ -489,6 +494,7 @@ class AsyncLLMEngine:
             top_k: Default top-k sampling parameter.
             enable_graph: Whether to enable graph compiling.
             attn_backend: Attention backend to use ('default', 'flash-attn').
+            kv_transfer_config: KV transfer configuration for PD separation.
         """
         config = EngineConfig(
             model_path=model_path,
@@ -506,9 +512,7 @@ class AsyncLLMEngine:
             top_k=top_k,
             enable_graph=enable_graph,
             attn_backend=attn_backend,
-            kv_connector_type=kv_connector_type,
-            kv_connector_role=kv_connector_role,
-            kv_connector_kwargs=kv_connector_kwargs,
+            kv_transfer_config=kv_transfer_config,
         )
         self.engine = LLMEngine(config)
         self.config = config

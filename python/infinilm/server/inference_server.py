@@ -17,6 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from infinilm.llm import AsyncLLMEngine, SamplingParams, FinishReason
+from infinilm.llm.engine_config import KVTransferConfig
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +112,7 @@ class InferenceServer:
         attn_backend: str = "default",
         ignore_eos: bool = False,
         # ---- PD separation (optional) ----
-        kv_connector_type: str = "null",
-        kv_connector_role: str = "none",
-        kv_connector_kwargs: dict = None,
+        kv_transfer_config: KVTransferConfig | None = None,
     ):
         """Initialize inference server.
 
@@ -135,9 +134,7 @@ class InferenceServer:
             port: Server port number.
             enable_graph: Whether to enable graph compiling.
             attn_backend: Attention backend to use ('default', 'flash-attn').
-            kv_connector_type: KV connector type for PD separation.
-            kv_connector_role: KV connector role ('none', 'sender', 'receiver').
-            kv_connector_kwargs: Extra KV connector arguments.
+            kv_transfer_config: KV transfer configuration for PD separation.
         """
         self.model_path = model_path
         # vLLM-like served model id: directory name of model_path
@@ -160,9 +157,7 @@ class InferenceServer:
         self.attn_backend = attn_backend
         self.ignore_eos = ignore_eos
         # PD separation
-        self.kv_connector_type = kv_connector_type
-        self.kv_connector_role = kv_connector_role
-        self.kv_connector_kwargs = kv_connector_kwargs or {}
+        self.kv_transfer_config = kv_transfer_config
 
         self.engine: AsyncLLMEngine = None
 
@@ -195,17 +190,12 @@ class InferenceServer:
                 enable_graph=self.enable_graph,
                 attn_backend=self.attn_backend,
                 # PD separation
-                kv_connector_type=self.kv_connector_type,
-                kv_connector_role=self.kv_connector_role,
-                kv_connector_kwargs=self.kv_connector_kwargs,
+                kv_transfer_config=self.kv_transfer_config,
             )
             self.engine.start()
             logger.info(f"Engine initialized with model at {self.model_path}")
             logger.info(f"  enable_graph: {self.enable_graph}")
-            logger.info(
-                f"  kv_connector: {self.kv_connector_type} "
-                f"(role={self.kv_connector_role})"
-            )
+            logger.info(f"  kv_transfer_config: {self.kv_transfer_config}")
             yield
             self.engine.stop()
 
@@ -652,18 +642,14 @@ def parse_args():
     )
     # ---- PD separation arguments ----
     parser.add_argument(
-        "--kv-connector",
+        "--kv-transfer-config",
         type=str,
-        default="null",
-        help="KV connector type for PD separation (default: 'null' = disabled)",
-    )
-    parser.add_argument(
-        "--kv-role",
-        type=str,
-        default="none",
-        choices=["none", "sender", "receiver", "both"],
-        help="KV connector role: 'none' (standalone), 'sender' (prefill), "
-        "'receiver' (decode), 'both'",
+        default=None,
+        help=(
+            "JSON string to initialize KVTransferConfig. "
+            "Example: "
+            '\'{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","engine_id":"d0"}\''
+        ),
     )
     # ----------------------------------
     parser.add_argument(
@@ -682,6 +668,23 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def parse_kv_transfer_config(kv_transfer_config_str: str) -> KVTransferConfig:
+    """Parse JSON string into KVTransferConfig.
+
+    The CLI expects a JSON object, e.g.:
+      {"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","engine_id":"d0"}
+    """
+    kv_dict = json.loads(kv_transfer_config_str)
+    if not isinstance(kv_dict, dict):
+        raise ValueError("--kv-transfer-config must be a JSON object")
+
+    kv_cfg = KVTransferConfig()
+    for k, v in kv_dict.items():
+        setattr(kv_cfg, k, v)
+
+    return kv_cfg
 
 
 def main():
@@ -715,9 +718,14 @@ def main():
             "Example: python infinilm.server.inference_server --nvidia --model_path=/data/shared/models/9G7B_MHA/ "
             "--max_tokens=100 --max_batch_size=32 --tp=1 --temperature=1.0 --top_p=0.8 --top_k=1"
             "\n"
-            "Optional: --enable-paged-attn --enable-graph --attn=default --kv-connector=null --kv-role=none"
+            'Optional: --enable-graph --attn=default --kv-transfer-config=\'{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}\''
         )
         sys.exit(1)
+
+    # PD separation config
+    kv_transfer_config = None
+    if args.kv_transfer_config:
+        kv_transfer_config = parse_kv_transfer_config(args.kv_transfer_config)
 
     server = InferenceServer(
         model_path=args.model_path,
@@ -738,9 +746,7 @@ def main():
         enable_graph=args.enable_graph,
         attn_backend=args.attn,
         ignore_eos=args.ignore_eos,
-        # PD separation
-        kv_connector_type=args.kv_connector,
-        kv_connector_role=args.kv_role,
+        kv_transfer_config=kv_transfer_config,
     )
     server.start()
 

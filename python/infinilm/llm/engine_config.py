@@ -3,7 +3,63 @@ Engine configuration — shared by LLMEngine, Worker, ModelRunner.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
+import os
+import json
+import uuid
+from typing import Any, Literal, get_args
+
+KVProducer = Literal["kv_producer", "kv_both"]
+KVConsumer = Literal["kv_consumer", "kv_both"]
+KVRole = Literal[KVProducer, KVConsumer]
+
+
+@dataclass
+class KVTransferConfig:
+    """Configuration for distributed KV cache transfer."""
+
+    #  The KV connector to transmit KV caches.
+    kv_connector: str | None = None  # kv_connector = "LMCacheConnectorV1"
+
+    # The engine id for KV transfers.
+    engine_id: str | None = None  # engine_id: str | None = "d0b90a4d"
+
+    #  Choices  are 'kv_producer', 'kv_consumer', and 'kv_both'.
+    kv_role = None  # kv_role = "kv_producer"
+
+    # any extra config that the connector may need.
+    kv_connector_extra_config = {"mooncake_protocol": "tcp"}
+
+    def __post_init__(self) -> None:
+        if self.engine_id is None:
+            self.engine_id = str(uuid.uuid4())
+
+        if self.kv_role is not None and self.kv_role not in get_args(KVRole):
+            raise ValueError(
+                f"Unsupported kv_role: {self.kv_role}. "
+                f"Supported roles are {get_args(KVRole)}"
+            )
+
+        if self.kv_connector is not None and self.kv_role is None:
+            raise ValueError(
+                "Please specify kv_role when kv_connector "
+                f"is set, supported roles are {get_args(KVRole)}"
+            )
+
+
+@dataclass
+class ParallelConfig:
+    """Configuration for the distributed execution."""
+
+    # world_size is TPxPP, it affects the number of workers we create.
+    tensor_parallel_size: int = 1
+
+    tensor_parallel_rank: int = 0
+
+    world_size: int = 1
+
+    #  Global rank in distributed setup.
+    rank: int = 0
 
 
 @dataclass
@@ -47,10 +103,19 @@ class EngineConfig:
     enable_graph: bool = False
     attn_backend: str = "default"
     # ---- PD separation ----
-    kv_connector_type: str = "null"
-    kv_connector_role: str = "none"
-    kv_connector_kwargs: Optional[dict] = field(default=None)
+    kv_transfer_config: KVTransferConfig = field(default_factory=KVTransferConfig)
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+
+    # hf_config
+    hf_config = None
 
     def __post_init__(self):
-        if self.kv_connector_kwargs is None:
-            self.kv_connector_kwargs = {}
+        path = os.path.join(self.model_path, "config.json")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"config.json not found in {self.model_path}")
+
+        with open(path, "r") as f:
+            self.hf_config = json.load(f)
+
+    def get_total_num_kv_heads(self) -> int:
+        return self.hf_config["num_key_value_heads"]

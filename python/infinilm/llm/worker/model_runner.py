@@ -37,6 +37,7 @@ from infinilm.llm.engine_config import EngineConfig
 from infinilm.llm.kv_connector.base import (
     KVConnectorBase,
     KVConnectorMetadata,
+    KVConnectorRole,
     NullKVConnector,
 )
 from infinilm.llm.kv_connector import create_kv_connector
@@ -213,11 +214,7 @@ class ModelRunner(KVConnectorModelRunnerMixin):
         # 3. Initialise KV connector
         self._init_kv_connector()
 
-        logger.info(
-            f"ModelRunner: model loaded from {self.config.model_path}, "
-            f"kv_connector={self.config.kv_connector_type} "
-            f"(role={self.config.kv_connector_role})"
-        )
+        logger.info(f"ModelRunner: model loaded from {self.config.model_path}")
 
     def _init_kv_connector(self) -> None:
         """Create KV connector based on configuration.
@@ -225,21 +222,25 @@ class ModelRunner(KVConnectorModelRunnerMixin):
         This corresponds to ``GPUModelRunner._maybe_init_kv_connector()``
         in vLLM v1.
         """
-        self.kv_connector = create_kv_connector(
-            connector_type=self.config.kv_connector_type,
-            role=self.config.kv_connector_role,
-            **self.config.kv_connector_kwargs,
-        )
+        self.kv_connector = None
+        if self.config.kv_transfer_config is not None:
+            self.kv_connector = create_kv_connector(
+                self.config, role=KVConnectorRole.WORKER
+            )
 
         # TODO: Mooncake: 注册kvcache
         kv_cache_list = self.model_engine.get_kv_cache()
-        for kv_cache_vec in kv_cache_list:  # per rank kv cache
-            for layer_kv in kv_cache_vec:  # per layer kv cache
-                # print(layer_kv.shape)  # shape：[2, 8, 8, 256, 128]
-                pass
-        # TODO: 构造输入
+        assert len(kv_cache_list) == 1
+        # TODO: 构造输入  # KV cache layer model.layers.0.self_attn.attn has shape torch.Size([2, 3572, 16, 8, 128])
         kv_caches = {}
-        self.kv_connector.register_kv_caches(kv_caches)
+        for kv_cache_vec in kv_cache_list:  # per rank kv cache
+            for layer_idx, layer_kv in enumerate(kv_cache_vec):  # per layer kv cache
+                # print(layer_kv.shape)  # shape：[2, 8, 8, 256, 128]
+                key_name = f"model.layers.{layer_idx}.self_attn.attn"
+                kv_caches[key_name] = layer_kv
+
+        if self.kv_connector is not None:
+            self.kv_connector.register_kv_caches(kv_caches)
 
     # ------------------------------------------------------------------
     # Model config access

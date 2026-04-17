@@ -181,13 +181,3 @@ class Worker(WorkerBase):
         if self.model_runner is not None and self.model_runner.kv_connector is not None:
             self.model_runner.kv_connector.close()
             logger.info("Worker: KV connector closed")
-
-
-def create_worker(config: EngineConfig) -> Worker:
-    """创建 Worker。
-    不再根据 role 选择不同子类——
-    PD 差异由 KVConnector role 处理。
-    """
-    worker = Worker(config)
-    logger.info(f"Created Worker (kv_connector_role={config.kv_connector_role})")
-    return worker
