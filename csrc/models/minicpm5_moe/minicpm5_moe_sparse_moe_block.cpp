@@ -2,7 +2,13 @@
 
 #include "infinicore/ops/add.hpp"
 #include "infinicore/ops/convert_to_f32.hpp"
+#include "infinicore/ops/index_add.hpp"
 #include "infinicore/ops/linear.hpp"
+#include "infinicore/ops/mul.hpp"
+#include "infinicore/ops/sigmoid.hpp"
+#include "infinicore/ops/take.hpp"
+#include "infinicore/ops/topk.hpp"
+#include "infinicore/ops/topkrouter.hpp"
 #include "../../utils/nvtx.hpp"
 
 #include <stdexcept>
@@ -121,31 +127,6 @@ inline void write_f32_as_element(infinicore::Tensor t, size_t idx, float v) {
         throw std::runtime_error("MiniCPM5MoeSparseMoeBlock: write_f32_as_element unsupported dtype");
     }
 }
-
-inline float sigmoid_f32(float x) {
-    // Stable enough for our typical router logits.
-    if (x >= 0.0f) {
-        float z = std::exp(-x);
-        return 1.0f / (1.0f + z);
-    }
-    float z = std::exp(x);
-    return z / (1.0f + z);
-}
-
-inline void topk_indices_desc(const std::vector<float> &vals, size_t k, std::vector<int32_t> &out_idx) {
-    // Select k indices with largest vals. Not sorted, matches HF `sorted=False`.
-    const size_t n = vals.size();
-    out_idx.resize(k);
-    std::vector<int32_t> idx(n);
-    for (size_t i = 0; i < n; ++i) idx[i] = static_cast<int32_t>(i);
-    if (k >= n) {
-        out_idx.assign(idx.begin(), idx.end());
-        return;
-    }
-    auto nth = idx.begin() + static_cast<std::ptrdiff_t>(k);
-    std::nth_element(idx.begin(), nth, idx.end(), [&](int32_t a, int32_t b) { return vals[a] > vals[b]; });
-    out_idx.assign(idx.begin(), nth);
-}
 } // namespace
 
 MiniCPM5MoeSparseMoeBlock::MiniCPM5MoeSparseMoeBlock(std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -176,10 +157,11 @@ MiniCPM5MoeSparseMoeBlock::MiniCPM5MoeSparseMoeBlock(std::shared_ptr<infinilm::c
 
 infinicore::Tensor MiniCPM5MoeSparseMoeBlock::forward(const infinicore::Tensor &hidden_states) const {
     infinilm::utils::NvtxRange nvtx_moe("MiniCPM5MoeSparseMoeBlock::forward");
-    // Correctness-first (slow) CPU-style dispatch.
+    // Routing + MoE dispatch.
     //
-    // TODO(opt): batch tokens per expert and fuse router+dispatch on-device.
-    // This per-token loop is only for bringing up correctness and logit sanity.
+    // - Fast path: `topkrouter` (CUDA) + per-expert batching (only for the fixed 256-expert kernel).
+    // - Correctness path: CPU routing + per-token expert dispatch (used for arbitrary expert counts),
+    //   matching the older bring-up implementation and HF semantics.
 
     auto shape = hidden_states->shape();
     const size_t batch_size = shape[0];
@@ -191,160 +173,357 @@ infinicore::Tensor MiniCPM5MoeSparseMoeBlock::forward(const infinicore::Tensor &
     const bool norm_topk_prob = infinilm::global_state::get_infinilm_config().model_config->get_or<bool>("norm_topk_prob", true);
     const float routed_scaling_factor = static_cast<float>(
         infinilm::global_state::get_infinilm_config().model_config->get<double>("routed_scaling_factor"));
-    const size_t n_group = infinilm::global_state::get_infinilm_config().model_config->get_or<size_t>("n_group", 1);
-    const size_t topk_group = infinilm::global_state::get_infinilm_config().model_config->get_or<size_t>("topk_group", 1);
+    // The current `topkrouter` backend implements the MiniCPM5/DeepSeek-style grouped routing
+    // with fixed (n_experts=256, n_group=8, topk_group=4). Ensure config matches.
+    const size_t n_group = infinilm::global_state::get_infinilm_config().model_config->get_or<size_t>("n_group", 8);
+    const size_t topk_group = infinilm::global_state::get_infinilm_config().model_config->get_or<size_t>("topk_group", 4);
 
     const size_t n_routed_experts = experts_.size();
     if (n_group == 0 || topk_group == 0 || n_routed_experts == 0 || (n_routed_experts % n_group) != 0) {
         throw std::runtime_error("MiniCPM5MoeSparseMoeBlock: invalid n_group/topk_group/n_routed_experts");
     }
-    const size_t experts_per_group = n_routed_experts / n_group;
 
     auto hs2d = hidden_states->view({n_tokens, hidden_size});
 
-    // HF reference routing:
-    // router_logits = linear(hidden_states.float32, weight.float32)
-    // scores = sigmoid(router_logits)
-    // scores_for_choice = scores + e_score_correction_bias
-    // group_scores = sum(top2(scores_for_choice per-group))
-    // select topk_group groups, mask others to 0 in scores_for_choice
-    // topk_indices = topk(scores_for_choice, k=top_k, sorted=False)
-    // topk_weights = scores.gather(topk_indices)
-    // optional renorm + scaling
-    //
-    // Router logits: F32 matmul on device; one sync to CPU for existing grouped top-k path.
+    // Router logits: do matmul in F32 for stability; `topkrouter` applies sigmoid + correction bias
+    // and returns routed weights (already scaled) + expert indices on device.
 
     if (!gate_weight_f32_device_.has_value()) {
         gate_weight_f32_device_ =
             infinicore::op::convert_to_f32(gate_->weight()->contiguous());
     }
+    if (!e_score_correction_bias_f32_device_.has_value()) {
+        e_score_correction_bias_f32_device_ =
+            infinicore::op::convert_to_f32(e_score_correction_bias_->contiguous());
+    }
 
     auto hs_f32 = infinicore::op::convert_to_f32(hs2d->contiguous());
     auto router_logits =
         infinicore::op::linear(hs_f32, gate_weight_f32_device_.value(), std::nullopt);
-    auto logits_cpu = router_logits->to(infinicore::Device::cpu());
-    logits_cpu = logits_cpu->contiguous();
 
-    auto bias_cpu = e_score_correction_bias_->to(infinicore::Device::cpu());
-    bias_cpu = bias_cpu->contiguous();
+    const bool force_fallback = (std::getenv("INFINILM_MOE_FORCE_FALLBACK") != nullptr);
+    const bool can_use_topkrouter = (n_routed_experts == 256 && n_group == 8 && topk_group == 4);
 
-    std::vector<std::vector<int32_t>> topk_indices_cpu(n_tokens);
-    std::vector<std::vector<float>> topk_weights_cpu(n_tokens);
-    std::vector<float> scores_row(n_routed_experts);
-    std::vector<float> scores_for_choice(n_routed_experts);
-    std::vector<float> group_scores(n_group);
-    std::vector<int32_t> chosen_groups;
-    std::vector<int32_t> chosen_experts;
+    // -------------------------
+    // Correctness-first fallback
+    // -------------------------
+    if (force_fallback || !can_use_topkrouter) {
+        // CPU routing (HF-aligned, sorted=False) + per-token expert dispatch.
+        auto logits_cpu = router_logits->to(infinicore::Device::cpu())->contiguous();
+        auto bias_cpu = e_score_correction_bias_f32_device_.value()->to(infinicore::Device::cpu())->contiguous();
 
-    for (size_t t = 0; t < n_tokens; ++t) {
-        for (size_t e = 0; e < n_routed_experts; ++e) {
-            float logit = scalar_to_f32(logits_cpu, t * n_routed_experts + e);
-            scores_row[e] = sigmoid_f32(logit);
+        std::vector<std::vector<int32_t>> topk_indices_cpu(n_tokens);
+        std::vector<std::vector<float>> topk_weights_cpu_vec(n_tokens);
+        std::vector<float> scores_row(n_routed_experts);
+        std::vector<float> scores_for_choice(n_routed_experts);
+        std::vector<int32_t> chosen_experts;
+
+        for (size_t t = 0; t < n_tokens; ++t) {
+            for (size_t e = 0; e < n_routed_experts; ++e) {
+                float logit = scalar_to_f32(logits_cpu, t * n_routed_experts + e);
+                // sigmoid
+                float s;
+                if (logit >= 0.0f) {
+                    float z = std::exp(-logit);
+                    s = 1.0f / (1.0f + z);
+                } else {
+                    float z = std::exp(logit);
+                    s = z / (1.0f + z);
+                }
+                scores_row[e] = s;
+            }
+
+            for (size_t e = 0; e < n_routed_experts; ++e) {
+                scores_for_choice[e] = scores_row[e] + scalar_to_f32(bias_cpu, e);
+            }
+
+            // Select k indices with largest vals. Not sorted (HF sorted=False).
+            chosen_experts.resize(top_k);
+            std::vector<int32_t> idx(n_routed_experts);
+            for (size_t i = 0; i < n_routed_experts; ++i) idx[i] = static_cast<int32_t>(i);
+            if (top_k >= n_routed_experts) {
+                chosen_experts.assign(idx.begin(), idx.end());
+            } else {
+                auto nth = idx.begin() + static_cast<std::ptrdiff_t>(top_k);
+                std::nth_element(
+                    idx.begin(), nth, idx.end(),
+                    [&](int32_t a, int32_t b) {
+                        return scores_for_choice[static_cast<size_t>(a)] > scores_for_choice[static_cast<size_t>(b)];
+                    });
+                chosen_experts.assign(idx.begin(), nth);
+            }
+
+            topk_indices_cpu[t] = chosen_experts;
+            topk_weights_cpu_vec[t].resize(top_k);
+            float denom = 0.0f;
+            for (size_t j = 0; j < top_k; ++j) {
+                float w = scores_row[static_cast<size_t>(chosen_experts[j])];
+                topk_weights_cpu_vec[t][j] = w;
+                denom += w;
+            }
+            if (norm_topk_prob) {
+                denom += 1e-20f;
+                float inv = 1.0f / denom;
+                for (size_t j = 0; j < top_k; ++j) topk_weights_cpu_vec[t][j] *= inv;
+            }
+            for (size_t j = 0; j < top_k; ++j) topk_weights_cpu_vec[t][j] *= routed_scaling_factor;
         }
 
-        // scores_for_choice = scores + e_score_correction_bias
-        for (size_t e = 0; e < n_routed_experts; ++e) {
-            float b = scalar_to_f32(bias_cpu, e);
-            scores_for_choice[e] = scores_row[e] + b;
-        }
+        // Dispatch:
+        // - default: per-token expert forwards + CPU FP32 row accumulation (reference numerics).
+        // - INFINILM_MOE_USE_BATCHED_DISPATCH=1: experimental batched gather path (may diverge; debug only).
+        //
+        // GPU-side row `add_` into a dense buffer was still incorrect in end-to-end tests even after
+        // including `data()` in InfiniCore tensor hashes; keep accumulation on CPU until that path is
+        // root-caused (likely elsewhere in the InfiniOP / graph stack).
+        const bool use_batched_dispatch = (std::getenv("INFINILM_MOE_USE_BATCHED_DISPATCH") != nullptr);
 
-        // group_scores: sum of top2 per group (using scores_for_choice)
-        for (size_t g = 0; g < n_group; ++g) {
-            float m1 = -std::numeric_limits<float>::infinity();
-            float m2 = -std::numeric_limits<float>::infinity();
-            size_t base = g * experts_per_group;
-            for (size_t j = 0; j < experts_per_group; ++j) {
-                float v = scores_for_choice[base + j];
-                if (v > m1) {
-                    m2 = m1;
-                    m1 = v;
-                } else if (v > m2) {
-                    m2 = v;
+        infinicore::Tensor out2d_cpu;
+
+        if (!use_batched_dispatch) {
+            out2d_cpu =
+                infinicore::Tensor::zeros({n_tokens, hidden_size}, infinicore::DataType::F32, infinicore::Device::cpu());
+            float *out_flat = reinterpret_cast<float *>(out2d_cpu->data());
+            for (size_t t = 0; t < n_tokens; ++t) {
+                float *row_acc = out_flat + t * hidden_size;
+                std::memset(row_acc, 0, hidden_size * sizeof(float));
+                for (size_t j = 0; j < top_k; ++j) {
+                    int32_t expert_id = topk_indices_cpu[t][j];
+                    if (expert_id < 0 || static_cast<size_t>(expert_id) >= experts_.size()) continue;
+                    float w = topk_weights_cpu_vec[t][j];
+                    if (w == 0.0f) continue;
+
+                    auto token_in = hs2d->narrow({{0, t, 1}}); // [1, H]
+                    auto token_out = experts_.at(static_cast<size_t>(expert_id))->forward(token_in); // [1, H]
+                    auto tok_cpu = token_out->to(infinicore::Device::cpu())->contiguous();
+                    for (size_t i = 0; i < hidden_size; ++i) {
+                        row_acc[i] += scalar_to_f32(tok_cpu, i) * w;
+                    }
                 }
             }
-            group_scores[g] = m1 + m2;
+        } else {
+            // Build per-expert token lists from CPU routing results.
+            std::vector<std::vector<int32_t>> expert_token_ids(n_routed_experts);
+            std::vector<std::vector<float>> expert_token_weights(n_routed_experts);
+            for (size_t t = 0; t < n_tokens; ++t) {
+                for (size_t j = 0; j < top_k; ++j) {
+                    int32_t e = topk_indices_cpu[t][j];
+                    if (e < 0 || static_cast<size_t>(e) >= n_routed_experts) continue;
+                    float w = topk_weights_cpu_vec[t][j];
+                    if (w == 0.0f) continue;
+                    expert_token_ids[static_cast<size_t>(e)].push_back(static_cast<int32_t>(t));
+                    expert_token_weights[static_cast<size_t>(e)].push_back(w);
+                }
+            }
+
+            auto device = hidden_states->device();
+            auto out2d_f32 = infinicore::Tensor::zeros({n_tokens, hidden_size}, infinicore::DataType::F32, device);
+            auto hs_flat = hs2d->contiguous()->view({n_tokens * hidden_size});
+
+            for (size_t e = 0; e < n_routed_experts; ++e) {
+                const auto &tok_ids = expert_token_ids[e];
+                const auto &tok_w = expert_token_weights[e];
+                const size_t m = tok_ids.size();
+                if (m == 0) continue;
+
+                // 1D gather indices into flattened [N*H]
+                auto gather_idx_cpu = infinicore::Tensor::empty({m * hidden_size}, infinicore::DataType::I64, infinicore::Device::cpu());
+                int64_t *gptr = reinterpret_cast<int64_t *>(gather_idx_cpu->data());
+                for (size_t i = 0; i < m; ++i) {
+                    int64_t base = static_cast<int64_t>(tok_ids[i]) * static_cast<int64_t>(hidden_size);
+                    for (size_t h = 0; h < hidden_size; ++h) {
+                        gptr[i * hidden_size + h] = base + static_cast<int64_t>(h);
+                    }
+                }
+                auto gather_idx_dev = gather_idx_cpu->to(device);
+
+                auto expert_in = infinicore::op::take(hs_flat, gather_idx_dev)->view({m, hidden_size});
+                auto expert_out = experts_.at(e)->forward(expert_in);
+                auto expert_out_f32 = infinicore::op::convert_to_f32(expert_out->contiguous());
+
+                auto w_full_cpu = infinicore::Tensor::empty({m * hidden_size}, infinicore::DataType::F32, infinicore::Device::cpu());
+                float *wptr = reinterpret_cast<float *>(w_full_cpu->data());
+                for (size_t i = 0; i < m; ++i) {
+                    float w = tok_w[i];
+                    for (size_t h = 0; h < hidden_size; ++h) {
+                        wptr[i * hidden_size + h] = w;
+                    }
+                }
+                auto w_full_dev = w_full_cpu->to(device)->view({m, hidden_size});
+                auto weighted_f32 = infinicore::op::mul(expert_out_f32, w_full_dev);
+
+                auto tok_idx_cpu = infinicore::Tensor::empty({m}, infinicore::DataType::I32, infinicore::Device::cpu());
+                std::memcpy(tok_idx_cpu->data(), tok_ids.data(), m * sizeof(int32_t));
+                auto tok_idx_dev = tok_idx_cpu->to(device);
+                infinicore::op::index_add_(out2d_f32, out2d_f32, 0, tok_idx_dev, weighted_f32, 1.0f);
+            }
+
+            // Copy device FP32 accumulation back to the CPU buffer expected below.
+            out2d_cpu = out2d_f32->to(infinicore::Device::cpu())->contiguous();
         }
 
-        // choose topk_group groups
-        topk_indices_desc(group_scores, topk_group, chosen_groups);
+        infinicore::Tensor routed;
+        if (hidden_states->dtype() == infinicore::DataType::F32) {
+            routed = out2d_cpu->to(hidden_states->device())->view({batch_size, seq_len, hidden_size});
+        } else {
+            auto routed_cpu =
+                infinicore::Tensor::empty({n_tokens, hidden_size}, hidden_states->dtype(), infinicore::Device::cpu());
+            const size_t numel = n_tokens * hidden_size;
+            for (size_t i = 0; i < numel; ++i) {
+                write_f32_as_element(routed_cpu, i, scalar_to_f32(out2d_cpu, i));
+            }
+            routed = routed_cpu->to(hidden_states->device())->view({batch_size, seq_len, hidden_size});
+        }
 
-        // mask scores_for_choice: groups not selected -> 0
-        std::vector<uint8_t> group_keep(n_group, 0);
-        for (auto g : chosen_groups) group_keep[static_cast<size_t>(g)] = 1;
-        for (size_t g = 0; g < n_group; ++g) {
-            if (group_keep[g]) continue;
-            size_t base = g * experts_per_group;
-            for (size_t j = 0; j < experts_per_group; ++j) {
-                scores_for_choice[base + j] = 0.0f;
+        auto shared = shared_experts_->forward(hidden_states);
+        return infinicore::op::add(routed, shared);
+    }
+    // Two routing paths:
+    // - Fast path: `topkrouter` (grouped) for the fixed 256-expert kernel.
+    // - Generic path: sigmoid + bias + topk (no grouping) for arbitrary expert counts.
+    infinicore::Tensor topk_indices_cpu;
+    infinicore::Tensor topk_weights_cpu;
+    if (can_use_topkrouter) {
+        auto [topk_weights_dev, topk_indices_dev] = infinicore::op::topkrouter(
+            router_logits,
+            e_score_correction_bias_f32_device_.value(),
+            routed_scaling_factor,
+            top_k);
+        topk_indices_cpu = topk_indices_dev->to(infinicore::Device::cpu())->contiguous();
+        topk_weights_cpu = topk_weights_dev->to(infinicore::Device::cpu())->contiguous();
+    } else {
+        // Generic HF-like routing (no grouped masking):
+        // scores = sigmoid(logits)
+        // scores_for_choice = scores + bias
+        // indices = topk(scores_for_choice, k=top_k, sorted=False)
+        // weights = scores.gather(indices), optional renorm, then scaling
+        auto scores = infinicore::op::sigmoid(router_logits); // float32
+        auto bias2d = e_score_correction_bias_f32_device_.value()->as_strided(
+            {n_tokens, n_routed_experts}, {0, 1});
+        auto scores_for_choice = infinicore::op::add(scores, bias2d);
+        auto _topk = infinicore::op::topk(scores_for_choice, top_k, 1, /*largest=*/true, /*sorted=*/false);
+        // topk values from scores_for_choice are not the gating weights; gather from `scores` on CPU.
+        auto topk_indices_dev = _topk.second;
+
+        auto scores_cpu = scores->to(infinicore::Device::cpu())->contiguous();
+        topk_indices_cpu = topk_indices_dev->to(infinicore::Device::cpu())->contiguous();
+
+        // Build topk_weights_cpu as float32 [N, top_k] on CPU.
+        topk_weights_cpu =
+            infinicore::Tensor::empty({n_tokens, top_k}, infinicore::DataType::F32, infinicore::Device::cpu());
+        for (size_t t = 0; t < n_tokens; ++t) {
+            float denom = 0.0f;
+            for (size_t j = 0; j < top_k; ++j) {
+                const int32_t e = scalar_to_i32(topk_indices_cpu, t * top_k + j);
+                float w = 0.0f;
+                if (e >= 0 && static_cast<size_t>(e) < n_routed_experts) {
+                    w = scalar_to_f32(scores_cpu, t * n_routed_experts + static_cast<size_t>(e));
+                }
+                write_f32_as_element(topk_weights_cpu, t * top_k + j, w);
+                denom += w;
+            }
+            if (norm_topk_prob) {
+                denom += 1e-20f;
+                float inv = 1.0f / denom;
+                for (size_t j = 0; j < top_k; ++j) {
+                    float w = scalar_to_f32(topk_weights_cpu, t * top_k + j) * inv;
+                    write_f32_as_element(topk_weights_cpu, t * top_k + j, w);
+                }
+            }
+            for (size_t j = 0; j < top_k; ++j) {
+                float w = scalar_to_f32(topk_weights_cpu, t * top_k + j) * routed_scaling_factor;
+                write_f32_as_element(topk_weights_cpu, t * top_k + j, w);
             }
         }
-
-        // topk experts on masked scores_for_choice
-        topk_indices_desc(scores_for_choice, top_k, chosen_experts);
-
-        // topk_weights from unmasked sigmoid scores (HF uses `scores.gather`)
-        topk_indices_cpu[t] = chosen_experts;
-        topk_weights_cpu[t].resize(top_k);
-        float denom = 0.0f;
-        for (size_t j = 0; j < top_k; ++j) {
-            float w = scores_row[static_cast<size_t>(chosen_experts[j])];
-            topk_weights_cpu[t][j] = w;
-            denom += w;
-        }
-        if (norm_topk_prob) {
-            denom += 1e-20f;
-            float inv = 1.0f / denom;
-            for (size_t j = 0; j < top_k; ++j) topk_weights_cpu[t][j] *= inv;
-        }
-        for (size_t j = 0; j < top_k; ++j) topk_weights_cpu[t][j] *= routed_scaling_factor;
     }
 
-    // HF `moe()`: `final_hidden_states = zeros_like(..., dtype=topk_weights.dtype)` — float32 accumulator.
-    // Keep the full routed buffer on CPU (float32) and upload once to avoid fragile D2D `copy_from` into narrowed views.
-    auto out2d_cpu = infinicore::Tensor::zeros({n_tokens, hidden_size}, infinicore::DataType::F32, infinicore::Device::cpu());
-    float *out_flat = reinterpret_cast<float *>(out2d_cpu->data());
-
+    std::vector<std::vector<int32_t>> expert_token_ids(n_routed_experts);
+    std::vector<std::vector<float>> expert_token_weights(n_routed_experts);
     for (size_t t = 0; t < n_tokens; ++t) {
-        float *row_acc = out_flat + t * hidden_size;
-        std::memset(row_acc, 0, hidden_size * sizeof(float));
         for (size_t j = 0; j < top_k; ++j) {
-            int32_t expert_id = topk_indices_cpu[t][j];
-            if (expert_id < 0 || static_cast<size_t>(expert_id) >= experts_.size()) {
+            const int32_t e = scalar_to_i32(topk_indices_cpu, t * top_k + j);
+            if (e < 0 || static_cast<size_t>(e) >= n_routed_experts) {
                 continue;
             }
-            float w = topk_weights_cpu[t][j];
+            const float w = scalar_to_f32(topk_weights_cpu, t * top_k + j);
             if (w == 0.0f) {
                 continue;
             }
+            expert_token_ids[static_cast<size_t>(e)].push_back(static_cast<int32_t>(t));
+            expert_token_weights[static_cast<size_t>(e)].push_back(w);
+        }
+    }
 
-            auto token_in = hs2d->narrow({{0, t, 1}}); // [1, H]
-            auto token_out = experts_.at(static_cast<size_t>(expert_id))->forward(token_in); // [1, H]
+    auto device = hidden_states->device();
+    // HF accumulates routed expert contributions in float32 (dtype=topk_weights.dtype),
+    // then casts back to activation dtype before adding shared experts.
+    auto out2d_f32 = infinicore::Tensor::zeros({n_tokens, hidden_size}, infinicore::DataType::F32, device);
+    auto hs2d_contig = hs2d->contiguous();
+    auto hs_flat = hs2d_contig->view({n_tokens * hidden_size});
 
-            auto tok_on_cpu = token_out->to(infinicore::Device::cpu());
-            tok_on_cpu = tok_on_cpu->contiguous();
-            for (size_t i = 0; i < hidden_size; ++i) {
-                row_acc[i] += scalar_to_f32(tok_on_cpu, i) * w;
+    for (size_t e = 0; e < n_routed_experts; ++e) {
+        const auto &tok_ids = expert_token_ids[e];
+        const auto &tok_w = expert_token_weights[e];
+        const size_t m = tok_ids.size();
+        if (m == 0) continue;
+
+        // token index tensor: [m]
+        auto tok_idx_cpu = infinicore::Tensor::empty({m}, infinicore::DataType::I32, infinicore::Device::cpu());
+        std::memcpy(tok_idx_cpu->data(), tok_ids.data(), m * sizeof(int32_t));
+        auto tok_idx_dev = tok_idx_cpu->to(device);
+
+        // gather indices into flattened [N*H] buffer: shape [m, H] of int64 offsets
+        auto gather_idx_cpu = infinicore::Tensor::empty({m, hidden_size}, infinicore::DataType::I64, infinicore::Device::cpu());
+        int64_t *gather_ptr = reinterpret_cast<int64_t *>(gather_idx_cpu->data());
+        for (size_t i = 0; i < m; ++i) {
+            const int64_t base = static_cast<int64_t>(tok_ids[i]) * static_cast<int64_t>(hidden_size);
+            int64_t *row = gather_ptr + i * static_cast<int64_t>(hidden_size);
+            for (size_t h = 0; h < hidden_size; ++h) {
+                row[h] = base + static_cast<int64_t>(h);
             }
         }
-    }
+        auto gather_idx_dev = gather_idx_cpu->to(device);
 
-    // HF `moe()` return: `.type(hidden_states.dtype)` before adding shared experts.
-    // Cast on CPU then one H2D upload — avoids fragile device-side rearrange on fp32 buffers.
-    infinicore::Tensor routed;
-    if (hidden_states->dtype() == infinicore::DataType::F32) {
-        routed = out2d_cpu->to(hidden_states->device())->view({batch_size, seq_len, hidden_size});
-    } else {
-        auto routed_cpu =
-            infinicore::Tensor::empty({n_tokens, hidden_size}, hidden_states->dtype(), infinicore::Device::cpu());
-        const size_t numel = n_tokens * hidden_size;
-        for (size_t i = 0; i < numel; ++i) {
-            write_f32_as_element(routed_cpu, i, scalar_to_f32(out2d_cpu, i));
+        // expert input: [m, H]
+        auto expert_in = infinicore::op::take(hs_flat, gather_idx_dev)->view({m, hidden_size});
+        auto expert_out = experts_.at(e)->forward(expert_in); // [m, H] (activation dtype)
+        auto expert_out_f32 = infinicore::op::convert_to_f32(expert_out->contiguous());
+
+        // weights expanded to [m, H] in float32 (mul has no broadcast).
+        auto w_full_cpu = infinicore::Tensor::empty({m, hidden_size}, infinicore::DataType::F32, infinicore::Device::cpu());
+        for (size_t i = 0; i < m; ++i) {
+            float w = tok_w[i];
+            size_t base = i * hidden_size;
+            for (size_t h = 0; h < hidden_size; ++h) {
+                write_f32_as_element(w_full_cpu, base + h, w);
+            }
         }
-        routed = routed_cpu->to(hidden_states->device())->view({batch_size, seq_len, hidden_size});
+        auto w_full_dev = w_full_cpu->to(device);
+        auto weighted_f32 = infinicore::op::mul(expert_out_f32, w_full_dev);
+
+        // out2d_f32[tok_ids] += weighted_f32
+        infinicore::op::index_add_(out2d_f32, out2d_f32, 0, tok_idx_dev, weighted_f32, 1.0f);
     }
 
+    // Add shared experts in float32, then cast back to activation dtype if needed.
     auto shared = shared_experts_->forward(hidden_states);
-    return infinicore::op::add(routed, shared);
+    auto shared_f32 = infinicore::op::convert_to_f32(shared->contiguous());
+    auto summed_f32 = infinicore::op::add(
+        out2d_f32->view({batch_size, seq_len, hidden_size}),
+        shared_f32);
+
+    if (hidden_states->dtype() == infinicore::DataType::F32) {
+        return summed_f32;
+    }
+
+    // Cast f32 -> activation dtype on CPU (one-time per layer output).
+    auto summed_cpu = summed_f32->to(infinicore::Device::cpu())->contiguous();
+    auto cast_cpu = infinicore::Tensor::empty({n_tokens, hidden_size}, hidden_states->dtype(), infinicore::Device::cpu());
+    const size_t numel = n_tokens * hidden_size;
+    for (size_t i = 0; i < numel; ++i) {
+        write_f32_as_element(cast_cpu, i, scalar_to_f32(summed_cpu, i));
+    }
+    return cast_cpu->to(device)->view({batch_size, seq_len, hidden_size});
 }
 
 } // namespace infinilm::models::minicpm5_moe

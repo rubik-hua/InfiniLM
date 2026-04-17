@@ -4,6 +4,7 @@
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/mha_kvcache.hpp"
 #include "infinicore/ops/mha_varlen.hpp"
+#include <atomic>
 
 namespace infinilm::layers::attention::backends {
 
@@ -68,16 +69,37 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
         // q_reshaped: [seq_len, num_heads, head_dim] → [seq_len, 1, num_heads, head_dim]
         // k/v cache:  [num_blocks, num_kv_heads, block_size, head_dim]
         //           → permute {0,2,1,3} → [num_blocks, block_size, num_kv_heads, head_dim]
-        auto q_for_fa = query->view({seq_len, 1, num_heads_, head_dim_});
-        auto attn_out_4d = infinicore::op::mha_kvcache(
-            q_for_fa,
-            k_total->permute({0, 2, 1, 3}), // [num_blocks, block_size, num_kv_heads, head_dim]
-            v_total->permute({0, 2, 1, 3}),
-            total_sequence_lengths.value(), // [seq_len] int32 (one entry per sequence)
-            block_tables.value(),           // [seq_len, max_num_blocks_per_seq] int32
-            std::nullopt,
-            scale_);
-        attn_output = attn_out_4d->view({seq_len, num_heads_, head_dim_});
+        //
+        // Guardrail: if the flash path throws (commonly due to missing Torch storage /
+        // ATen bridge requirements), fall back to stable paged-attn decode.
+        try {
+            auto q_for_fa = query->view({seq_len, 1, num_heads_, head_dim_});
+            auto attn_out_4d = infinicore::op::mha_kvcache(
+                q_for_fa,
+                k_total->permute({0, 2, 1, 3}), // [num_blocks, block_size, num_kv_heads, head_dim]
+                v_total->permute({0, 2, 1, 3}),
+                total_sequence_lengths.value(), // [seq_len] int32 (one entry per sequence)
+                block_tables.value(),           // [seq_len, max_num_blocks_per_seq] int32
+                std::nullopt,
+                scale_);
+            attn_output = attn_out_4d->view({seq_len, num_heads_, head_dim_});
+        } catch (const std::exception &e) {
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                spdlog::warn(
+                    "FlashAttentionImpl decode failed (falling back to paged-attn decode): {}",
+                    e.what());
+            }
+            infinicore::op::paged_attention_(
+                attn_output,
+                query,
+                k_total,
+                v_total,
+                block_tables.value(),
+                total_sequence_lengths.value(),
+                std::nullopt,
+                scale_);
+        }
     }
     attn_output = attn_output->view({1, seq_len, num_heads_ * head_dim_});
     return attn_output;

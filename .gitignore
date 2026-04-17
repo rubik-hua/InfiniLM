@@ -31,3 +31,6 @@ __pycache__/
 *.http
 
 *.nsys-rep
+
+# Local profiling captures (often multi-GB)
+examples/profiles/

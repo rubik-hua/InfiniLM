@@ -7,6 +7,7 @@
 #include "infinicore/ops.hpp"
 #include <cstdlib>
 #include <iostream>
+#include <pthread.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 
@@ -233,6 +234,15 @@ RankWorker::Output RankWorker::get_output() {
 //------------------------------------------------------
 void RankWorker::thread_loop() {
     try {
+        // Improve Nsight Systems trace readability.
+        // pthread_setname_np is limited to 16 bytes including '\0'.
+        {
+            char name[16];
+            // `RankInfo` no longer carries a global rank; keep tp_rank for trace readability.
+            std::snprintf(name, sizeof(name), "rkW-tp%d", rank_info_.tp_rank);
+            pthread_setname_np(pthread_self(), name);
+        }
+
         {
             std::lock_guard<std::mutex> lk(mutex_);
 
@@ -399,6 +409,8 @@ void RankWorker::thread_loop() {
 
                             auto output_ids{infinicore::Tensor::empty({n_req}, infinicore::DataType::I64, rank_info_.device)};
                             infinicore::Tensor last_logits;
+                            const bool want_last_logits =
+                                (std::getenv("INFINILM_RETURN_LAST_LOGITS") != nullptr);
 
                             if (enable_step_timing) {
                                 ev_samp_start = infinicore::context::createEvent();
@@ -410,7 +422,7 @@ void RankWorker::thread_loop() {
                             for (auto i{decltype(n_req)(0)}; i < n_req; ++i) {
                                 auto score{logits->view({batch_size * total_len, vocab_size})->narrow({{0, size_t(input_offsets[i + 1] - 1), 1}})->view({vocab_size})};
                                 auto out{output_ids->narrow({{0, i, 1}})->view({})};
-                                if (n_req == 1) {
+                                if (want_last_logits && n_req == 1) {
                                     last_logits = score->to(infinicore::Device::cpu());
                                 }
                                 float random_val = std::uniform_real_distribution<float>(0, 1)(rng_);

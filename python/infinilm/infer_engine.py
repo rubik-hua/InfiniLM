@@ -2,6 +2,7 @@ import time
 from dataclasses import dataclass
 
 import infinicore
+import numpy as np
 
 from infinilm.auto_config import AutoConfig
 from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig
@@ -181,7 +182,18 @@ class InferEngine(_infinilm.InferEngine):
         *,
         _measure_and_log_time=False,
         _return_time_measurements: bool = False,
+        _return_step_breakdown: bool = False,
     ):
+        def _copy_from_numpy(dst: infinicore.Tensor, src_np: np.ndarray):
+            # src_np must remain alive for the duration of this call.
+            tmp = infinicore.from_blob(
+                int(src_np.ctypes.data),
+                list(src_np.shape),
+                dtype=dst.dtype,
+                device=infinicore.device("cpu", 0),
+            )
+            dst.copy_(tmp)
+
         if generation_config.eos_token_id is None:
             eos_token_id = self.config.eos_token_id
         else:
@@ -222,6 +234,47 @@ class InferEngine(_infinilm.InferEngine):
                 dtype=infinicore.int32,
             )
 
+        # Reuse per-step metadata buffers to reduce Python overhead.
+        cpu = infinicore.device("cpu", 0)
+        past_kv_np = np.empty((initial_batch_size,), dtype=np.int32)
+        total_kv_np = np.empty((initial_batch_size,), dtype=np.int32)
+        cu_seqlens_np = np.empty((initial_batch_size + 1,), dtype=np.int32)
+        input_offsets_np = np.empty((initial_batch_size + 1,), dtype=np.int32)
+
+        past_kv_lengths_buf = infinicore.empty(
+            [initial_batch_size], dtype=infinicore.int32, device=cpu
+        )
+        total_kv_lengths_buf = infinicore.empty(
+            [initial_batch_size], dtype=infinicore.int32, device=cpu
+        )
+        cu_seqlens_buf = infinicore.empty(
+            [initial_batch_size + 1], dtype=infinicore.int32, device=cpu
+        )
+        input_offsets_buf = infinicore.empty(
+            [initial_batch_size + 1], dtype=infinicore.int32, device=cpu
+        )
+
+        if self.enable_paged_attn:
+            # Iter=0 uses the full prompt; later steps use seq_len=1.
+            max_pos_elems = initial_batch_size * initial_seqlen
+            position_ids_np = np.empty((max_pos_elems,), dtype=np.int64)
+            slot_mapping_np = np.empty((max_pos_elems,), dtype=np.int64)
+            position_ids_buf = infinicore.empty(
+                [max_pos_elems], dtype=infinicore.int64, device=cpu
+            )
+            slot_mapping_buf = infinicore.empty(
+                [max_pos_elems], dtype=infinicore.int64, device=cpu
+            )
+        else:
+            position_ids_np = np.empty(
+                (initial_batch_size, initial_seqlen), dtype=np.int64
+            )
+            position_ids_buf = infinicore.empty(
+                [initial_batch_size, initial_seqlen],
+                dtype=infinicore.int64,
+                device=cpu,
+            )
+
         for iter in range(0, generation_config.max_new_tokens):
             if _measure_and_log_time:
                 start_time = time.perf_counter()
@@ -233,60 +286,89 @@ class InferEngine(_infinilm.InferEngine):
 
             if self.enable_paged_attn:
                 input_ids = input_ids.view([1, batch_size * seq_len])
-                position_ids = infinicore.from_list(
-                    list(range(past_seq_len, past_seq_len + seq_len)) * batch_size,
-                    dtype=infinicore.int64,
-                )
+                # position_ids: shape [batch_size * seq_len]
+                cur_pos_elems = batch_size * seq_len
+                if cur_pos_elems > position_ids_buf.numel():
+                    raise ValueError(
+                        f"position_ids buffer too small: need {cur_pos_elems}, "
+                        f"have {position_ids_buf.numel()} (batch={batch_size}, seq={seq_len})"
+                    )
+
+                if seq_len == 1:
+                    position_ids_np[:cur_pos_elems] = past_seq_len
+                else:
+                    base = np.arange(
+                        past_seq_len, past_seq_len + seq_len, dtype=np.int64
+                    )
+                    position_ids_np[:cur_pos_elems] = np.tile(base, batch_size)
+
+                position_ids = position_ids_buf.narrow(0, 0, cur_pos_elems)
+                _copy_from_numpy(position_ids, position_ids_np[:cur_pos_elems])
 
                 if iter == 0:
-                    slot_mapping_list = []
-                    for b in range(batch_size):
-                        slot_mapping_list.extend(
-                            [
-                                b * max_blocks_per_batch * paged_block_size + i
-                                for i in range(seq_len)
-                            ]
+                    # slot_mapping: shape [batch_size * seq_len]
+                    stride = max_blocks_per_batch * paged_block_size
+                    if seq_len == 1:
+                        slot_mapping_np[:cur_pos_elems] = (
+                            np.arange(batch_size, dtype=np.int64) * stride
                         )
+                    else:
+                        base = np.arange(seq_len, dtype=np.int64)
+                        slot_mapping_np[:cur_pos_elems] = (
+                            np.repeat(np.arange(batch_size, dtype=np.int64), seq_len)
+                            * stride
+                            + np.tile(base, batch_size)
+                        )
+                    slot_mapping = slot_mapping_buf.narrow(0, 0, cur_pos_elems)
+                    _copy_from_numpy(slot_mapping, slot_mapping_np[:cur_pos_elems])
                 else:
-                    slot_mapping_list = [
-                        i
-                        for i in range(
-                            past_seq_len,
-                            max_blocks_per_batch
-                            * paged_block_size
-                            * initial_batch_size,
-                            max_blocks_per_batch * paged_block_size,
-                        )
-                    ]
-
-                slot_mapping = infinicore.from_list(
-                    slot_mapping_list,
-                    dtype=infinicore.int64,
-                )
+                    # decode (seq_len==1): one slot per batch item
+                    stride = max_blocks_per_batch * paged_block_size
+                    slot_mapping_np[:batch_size] = past_seq_len + np.arange(
+                        batch_size, dtype=np.int64
+                    ) * stride
+                    slot_mapping = slot_mapping_buf.narrow(0, 0, batch_size)
+                    _copy_from_numpy(slot_mapping, slot_mapping_np[:batch_size])
             else:
-                position_ids = infinicore.from_list(
-                    [
-                        list(range(past_seq_len, past_seq_len + seq_len))
-                        for _ in range(batch_size)
-                    ],
-                    dtype=infinicore.int64,
-                )
+                # position_ids: shape [batch_size, seq_len]
+                if batch_size > position_ids_buf.size(0) or seq_len > position_ids_buf.size(1):
+                    raise ValueError(
+                        f"position_ids buffer too small: need [{batch_size},{seq_len}], "
+                        f"have {position_ids_buf.shape}"
+                    )
+
+                if seq_len == 1:
+                    position_ids_np[:batch_size, 0] = past_seq_len
+                else:
+                    base = np.arange(
+                        past_seq_len, past_seq_len + seq_len, dtype=np.int64
+                    )
+                    position_ids_np[:batch_size, :seq_len] = base[None, :]
+
+                position_ids = position_ids_buf.narrow(1, 0, seq_len)
+                _copy_from_numpy(position_ids, position_ids_np[:batch_size, :seq_len])
 
                 slot_mapping = None
 
-            past_kv_lengths = infinicore.from_list(
-                [past_seq_len] * batch_size, dtype=infinicore.int32
-            )
-            total_kv_lengths = infinicore.from_list(
-                [past_seq_len + seq_len] * batch_size, dtype=infinicore.int32
-            )
-            cu_seqlens = infinicore.from_list(
-                [(past_seq_len + seq_len) * i for i in range(batch_size + 1)],
-                dtype=infinicore.int32,
-            )
-            input_offsets = infinicore.from_list(
-                [seq_len * i for i in range(batch_size + 1)], dtype=infinicore.int32
-            )
+            past_kv_np[:batch_size] = past_seq_len
+            total_kv_np[:batch_size] = past_seq_len + seq_len
+            step_total = past_seq_len + seq_len
+            cu_seqlens_np[: batch_size + 1] = np.arange(
+                batch_size + 1, dtype=np.int32
+            ) * step_total
+            input_offsets_np[: batch_size + 1] = np.arange(
+                batch_size + 1, dtype=np.int32
+            ) * seq_len
+
+            past_kv_lengths = past_kv_lengths_buf.narrow(0, 0, batch_size)
+            total_kv_lengths = total_kv_lengths_buf.narrow(0, 0, batch_size)
+            cu_seqlens = cu_seqlens_buf.narrow(0, 0, batch_size + 1)
+            input_offsets = input_offsets_buf.narrow(0, 0, batch_size + 1)
+
+            _copy_from_numpy(past_kv_lengths, past_kv_np[:batch_size])
+            _copy_from_numpy(total_kv_lengths, total_kv_np[:batch_size])
+            _copy_from_numpy(cu_seqlens, cu_seqlens_np[: batch_size + 1])
+            _copy_from_numpy(input_offsets, input_offsets_np[: batch_size + 1])
 
             if _measure_and_log_time:
                 cpu_prep_s.append(time.perf_counter() - t_prep0)
@@ -364,6 +446,17 @@ class InferEngine(_infinilm.InferEngine):
             if not _measure_and_log_time:
                 raise ValueError(
                     "`_return_time_measurements=True` requires `_measure_and_log_time=True`."
+                )
+            if _return_step_breakdown:
+                return (
+                    output_ids,
+                    time_measurements,
+                    {
+                        "cpu_prep_s": cpu_prep_s,
+                        "gpu_forward_ms": gpu_forward_ms,
+                        "gpu_sampling_ms": gpu_sampling_ms,
+                        "gpu_d2h_ms": gpu_d2h_ms,
+                    },
                 )
             return output_ids, time_measurements
 

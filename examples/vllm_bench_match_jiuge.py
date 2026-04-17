@@ -59,11 +59,21 @@ def _encode_like_jiuge(tokenizer, prompt: str) -> list[int]:
     )["input_ids"]
 
 
+def _repeat_prompt_tokens(input_ids: list[int], target_len: int) -> list[int]:
+    if target_len <= 0:
+        return []
+    if not input_ids:
+        raise ValueError("Tokenized prompt is empty.")
+    repeat_times = (target_len + len(input_ids) - 1) // len(input_ids)
+    return (input_ids * repeat_times)[:target_len]
+
+
 def _sampling_like_hf_bench(
     max_new_tokens: int,
     top_k: int,
     top_p: float,
     temperature: float,
+    ignore_eos: bool,
 ):
     from vllm import SamplingParams
 
@@ -75,12 +85,14 @@ def _sampling_like_hf_bench(
             temperature=0.0,
             top_p=1.0,
             top_k=-1,
+            ignore_eos=ignore_eos,
         )
     return SamplingParams(
         max_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k if top_k > 0 else -1,
+        ignore_eos=ignore_eos,
     )
 
 
@@ -88,11 +100,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", type=str, required=True)
     ap.add_argument("--prompt", type=str, default="Hi")
+    ap.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=None,
+        help="If set, repeat/crop the tokenized prompt to exactly this many tokens "
+        "(after applying the chat template), matching bench_balanced.py behavior.",
+    )
     ap.add_argument("--max-new-tokens", type=int, default=16)
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--top-k", type=int, default=1)
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument(
+        "--stop-on-eos",
+        action="store_true",
+        default=False,
+        help="Stop decoding if EOS is generated (default: keep going).",
+    )
     ap.add_argument("--dtype", type=str, default="bfloat16", choices=["auto", "bfloat16", "float16", "float32"])
     ap.add_argument("--max-model-len", type=int, default=8192)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
@@ -103,6 +128,12 @@ def main() -> int:
         help="Disable torch.compile / cudagraphs (helps some remote-code / MoE models).",
     )
     ap.add_argument("--json", action="store_true", help="Print one JSON object with metrics.")
+    ap.add_argument(
+        "--json-out",
+        type=str,
+        default=None,
+        help="If set, save metrics JSON to this path.",
+    )
     args = ap.parse_args()
 
     if args.batch_size != 1:
@@ -122,7 +153,13 @@ def main() -> int:
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     cfg = transformers.AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     _maybe_fix_llama_tokenizer_decoder(tokenizer, getattr(cfg, "model_type", ""))
-    prompt_ids = _encode_like_jiuge(tokenizer, args.prompt)
+    base_prompt_ids = _encode_like_jiuge(tokenizer, args.prompt)
+    if args.prompt_tokens is None:
+        prompt_ids = base_prompt_ids
+        prompt_tokens_target = None
+    else:
+        prompt_tokens_target = int(args.prompt_tokens)
+        prompt_ids = _repeat_prompt_tokens(base_prompt_ids, prompt_tokens_target)
     tok_s = time.perf_counter() - tok0
 
     t_load0 = time.perf_counter()
@@ -143,6 +180,7 @@ def main() -> int:
         args.top_k,
         args.top_p,
         args.temperature,
+        ignore_eos=(not args.stop_on_eos),
     )
     prompt = TokensPrompt(prompt_token_ids=prompt_ids)
 
@@ -187,6 +225,7 @@ def main() -> int:
         "vllm_version": __import__("vllm").__version__,
         "transformers_version": transformers.__version__,
         "prompt": args.prompt,
+        "prompt_tokens_target": prompt_tokens_target,
         "prompt_tokens": n_prompt,
         "max_new_tokens": args.max_new_tokens,
         "n_generated": n_gen,
@@ -202,6 +241,12 @@ def main() -> int:
         "decode_tok_per_s": decode_tok_per_s,
         "queued_engine_s": metrics.scheduled_ts - metrics.queued_ts,
     }
+
+    if args.json_out:
+        out_path = os.path.abspath(os.path.expanduser(args.json_out))
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(row, f, indent=2)
 
     if args.json:
         print(json.dumps(row, indent=2))

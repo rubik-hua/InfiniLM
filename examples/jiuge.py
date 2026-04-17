@@ -1,3 +1,17 @@
+import ctypes
+import os
+
+# InfiniCore may reference flash-attn symbols; load the CUDA extension with RTLD_GLOBAL first.
+def _maybe_load_flash_attn_global() -> None:
+    if os.environ.get("INFINILM_DISABLE_FLASH_ATTN_RTLD_GLOBAL") == "1":
+        return
+    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
+    if os.path.isfile(fa):
+        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
+
+
+_maybe_load_flash_attn_global()
+
 import infinicore
 import transformers
 from transformers import AutoTokenizer
@@ -8,7 +22,6 @@ from infinilm.infer_engine import GenerationConfig, InferEngine
 import argparse
 import sys
 import time
-import os
 import numpy as np
 from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig
 from packaging import version
@@ -292,7 +305,14 @@ def test(
     t2 = time.time()
 
     numpy_output_ids = np.array([output_id.to_numpy()[0] for output_id in output_ids])
-    print(tokenizer.decode(numpy_output_ids, skip_special_tokens=True))
+    decoded = tokenizer.decode(numpy_output_ids.tolist(), skip_special_tokens=True)
+    if decoded.strip() == "":
+        # Keep output visible even if all tokens are special/whitespace.
+        decoded_raw = tokenizer.decode(numpy_output_ids.tolist(), skip_special_tokens=False)
+        print(f"[decoded empty] output_ids={numpy_output_ids.tolist()}")
+        print(f"[decoded raw] {decoded_raw!r}")
+    else:
+        print(decoded, end="" if decoded.endswith("\n") else "\n")
 
     print(
         f"total_time: {round((t2 - t1) * 1000, 2)} ms",
