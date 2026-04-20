@@ -646,9 +646,10 @@ def parse_args():
         type=str,
         default=None,
         help=(
-            "JSON string to initialize KVTransferConfig. "
+            "JSON object for KVTransferConfig. Allowed keys only: "
+            "kv_connector, engine_id, kv_role, kv_connector_extra_config (omit any for defaults). "
             "Example: "
-            '\'{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","engine_id":"d0"}\''
+            '\'{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}\''
         ),
     )
     # ----------------------------------
@@ -671,20 +672,17 @@ def parse_args():
 
 
 def parse_kv_transfer_config(kv_transfer_config_str: str) -> KVTransferConfig:
-    """Parse JSON string into KVTransferConfig.
-
-    The CLI expects a JSON object, e.g.:
-      {"kv_connector":"MooncakeConnector","kv_role":"kv_consumer","engine_id":"d0"}
-    """
+    """Parse JSON string into KVTransferConfig."""
     kv_dict = json.loads(kv_transfer_config_str)
     if not isinstance(kv_dict, dict):
         raise ValueError("--kv-transfer-config must be a JSON object")
 
-    kv_cfg = KVTransferConfig()
-    for k, v in kv_dict.items():
-        setattr(kv_cfg, k, v)
-
-    return kv_cfg
+    return KVTransferConfig(
+        kv_connector=kv_dict.get("kv_connector", None),
+        engine_id=kv_dict.get("engine_id", None),
+        kv_role=kv_dict.get("kv_role", None),
+        kv_connector_extra_config=kv_dict.get("kv_connector_extra_config", None),
+    )
 
 
 def main():

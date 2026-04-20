@@ -58,7 +58,8 @@ def should_launch_bootstrap_server(infinilm_config) -> bool:
     # In internal LB mode,
     # only the real global first rank need to launch the bootstrap server.
 
-    return True  # TODO: 再确认
+    # TODO: 再确认是否需要修改
+    return 0 == infinilm_config.parallel_config.tensor_parallel_rank
 
 
 def get_mooncake_bootstrap_addr(infinilm_config) -> tuple[str, int]:
@@ -224,14 +225,18 @@ class MooncakeConnectorWorker:
             if self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config):
+            if should_launch_bootstrap_server(self.infinilm_config):
                 self.bootstrap_server.shutdown()
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
 
     async def register_worker_with_bootstrap(self):
-        host, port = get_mooncake_bootstrap_addr(self.vllm_config)
+        logger.debug(
+            "Mooncake sender register_worker_with_bootstrap start!",
+        )
+
+        host, port = get_mooncake_bootstrap_addr(self.infinilm_config)
         url = make_zmq_path("http", host, port) + "/register"
         worker_addr = make_zmq_path("tcp", self.hostname, self.side_channel_port)
         payload = RegisterWorkerPayload(
@@ -250,6 +255,7 @@ class MooncakeConnectorWorker:
                 break
             except httpx.ConnectError:
                 # Bootstrap server not ready, wait for a while and retry.
+                logger.debug("Bootstrap server not ready, wait for a while and retry.")
                 await asyncio.sleep(1)
             except Exception as e:
                 err_msg = (
@@ -275,6 +281,12 @@ class MooncakeConnectorWorker:
         )
 
         await self.register_worker_with_bootstrap()
+        if False:
+            import time
+
+            time.sleep(1)
+            self.dp_rank = 1
+            await self.register_worker_with_bootstrap()
 
         # Create async worker tasks that process items from the queue
         sender_tasks = [
@@ -565,7 +577,12 @@ class MooncakeConnectorWorker:
             logger.debug(
                 "registering layer %s with shape %s", layer_name, cache_or_caches.shape
             )
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+
+            assert split_k_and_v, "split_k_and_v must be True"
+            cache_list = [
+                cache_or_caches.narrow(0, 0, 1).squeeze(0),  # k
+                cache_or_caches.narrow(0, 1, 1).squeeze(0),  # v
+            ]
 
             for cache in cache_list:
                 base_addr = cache.data_ptr()
@@ -591,6 +608,8 @@ class MooncakeConnectorWorker:
                 assert tensor_size_bytes == curr_tensor_size_bytes, (
                     "All kv cache tensors must have the same size"
                 )
+
+                # TODO: 再确认, block_size的shape再倒数第二维度.
                 kernel_block_size = cache.shape[-2]
                 assert self.block_size == kernel_block_size
                 kv_data_ptrs.append(base_addr)

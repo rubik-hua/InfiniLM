@@ -1,6 +1,7 @@
 import zmq
 import zmq.asyncio
 from typing import TYPE_CHECKING, Any
+import ipaddress
 import psutil
 import os
 from dataclasses import dataclass, field
@@ -23,6 +24,14 @@ def get_ip() -> str:
     return host_ip
 
 
+def is_valid_ipv6_address(address: str) -> bool:
+    try:
+        ipaddress.IPv6Address(address)
+        return True
+    except ValueError:
+        return False
+
+
 def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     """Make a ZMQ path from its parts.
 
@@ -39,6 +48,34 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"
     return f"{scheme}://{host}:{port}"
+
+
+def split_zmq_path(path: str) -> tuple[str, str, str]:
+    """Split a zmq path into its parts."""
+
+    print(f"split_zmq_path : --------------------------> ?? path: {path}")
+    parsed = parse_url(path)
+
+    print("split_zmq_path : --------------------------> ok")
+
+    if not parsed.scheme:
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = str(parsed.port or "")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]  # Remove brackets for IPv6 address
+
+    if scheme == "tcp" and not all((host, port)):
+        # The host and port fields are required for tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    if scheme != "tcp" and port:
+        # port only makes sense with tcp
+        raise ValueError(f"Invalid zmq path: {path}")
+
+    return scheme, host, port
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
@@ -165,8 +202,8 @@ class TpKVTopology:
         # return not (
         #     self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
         # )
-        # TODO:
-        return False
+        # TODO: 再确认是否需要修改
+        return True
 
     @property
     def tp_size(self) -> int:

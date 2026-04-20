@@ -19,3 +19,8 @@ xmake build _infinilm && xmake install _infinilm
 --max_batch_size 1 \
 --attn paged-attn \
 --cache_type paged \
+--kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+
+
+## --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
+## --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'

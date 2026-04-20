@@ -7,44 +7,57 @@ from typing import Any
 import os
 import json
 import uuid
-from typing import Any, Literal, get_args
 
-KVProducer = Literal["kv_producer", "kv_both"]
-KVConsumer = Literal["kv_consumer", "kv_both"]
-KVRole = Literal[KVProducer, KVConsumer]
+# Valid kv_role strings for PD / Mooncake wiring.
+KV_ROLE_CHOICES = frozenset({"kv_producer", "kv_consumer", "kv_both"})
 
 
-@dataclass
+@dataclass(init=False)
 class KVTransferConfig:
-    """Configuration for distributed KV cache transfer."""
+    """Configuration for distributed KV cache transfer.
 
-    #  The KV connector to transmit KV caches.
-    kv_connector: str | None = None  # kv_connector = "LMCacheConnectorV1"
+    Constructor keyword arguments default to ``None`` / built-in extras; callers may omit
+    fields. JSON parsing for CLI should reject unknown keys (see ``parse_kv_transfer_config``).
+    """
 
-    # The engine id for KV transfers.
-    engine_id: str | None = None  # engine_id: str | None = "d0b90a4d"
+    kv_connector: str | None
+    engine_id: str | None
+    kv_role: str | None
+    kv_connector_extra_config: dict[str, Any]
 
-    #  Choices  are 'kv_producer', 'kv_consumer', and 'kv_both'.
-    kv_role = None  # kv_role = "kv_producer"
-
-    # any extra config that the connector may need.
-    kv_connector_extra_config = {"mooncake_protocol": "tcp"}
+    def __init__(
+        self,
+        *,
+        kv_connector: str | None = None,
+        engine_id: str | None = None,
+        kv_role: str | None = None,
+        kv_connector_extra_config: dict[str, Any] | None = None,
+    ) -> None:
+        self.kv_connector = kv_connector
+        self.engine_id = engine_id
+        self.kv_role = kv_role
+        if kv_connector_extra_config is not None:
+            self.kv_connector_extra_config = dict(kv_connector_extra_config)
+        else:
+            self.kv_connector_extra_config = {"mooncake_protocol": "tcp"}
+        self.__post_init__()
 
     def __post_init__(self) -> None:
-        if self.engine_id is None:
-            self.engine_id = str(uuid.uuid4())
-
-        if self.kv_role is not None and self.kv_role not in get_args(KVRole):
+        if self.kv_role is not None and self.kv_role not in KV_ROLE_CHOICES:
             raise ValueError(
-                f"Unsupported kv_role: {self.kv_role}. "
-                f"Supported roles are {get_args(KVRole)}"
+                f"Unsupported kv_role: {self.kv_role!r}. "
+                f"Supported roles are {sorted(KV_ROLE_CHOICES)}"
             )
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError(
-                "Please specify kv_role when kv_connector "
-                f"is set, supported roles are {get_args(KVRole)}"
+                "Please specify kv_role when kv_connector is set; "
+                f"supported roles are {sorted(KV_ROLE_CHOICES)}"
             )
+
+        if self.engine_id is None:
+            role_key = self.kv_role if self.kv_role is not None else "unset"
+            self.engine_id = f"{role_key}_" + str(uuid.uuid4())
 
 
 @dataclass

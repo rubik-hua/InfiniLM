@@ -169,7 +169,8 @@ class Worker(WorkerBase):
         """Get KV connector metadata from this worker if available."""
 
         # TODO: Mooncake: 握手数据
-        return self.model_runner.kv_connector.get_kv_connector_handshake_metadata()
+        # return self.model_runner.kv_connector.get_kv_connector_handshake_metadata()
+        return "not implemented"
 
     # ------------------------------------------------------------------
     # Cleanup

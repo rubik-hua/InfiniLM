@@ -11,7 +11,7 @@ xmake build _infinilm && xmake install _infinilm
 --temperature 1.0 \
 --top_p 0.8 \
 --top_k 1 \
---port 8103 \
+--port 8104 \
 --tp 1  \
 --block_size 256 \
 --max_tokens 128 \
@@ -19,3 +19,8 @@ xmake build _infinilm && xmake install _infinilm
 --max_batch_size 1 \
 --attn paged-attn \
 --cache_type paged \
+--kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
+
+
+## --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
+## --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
