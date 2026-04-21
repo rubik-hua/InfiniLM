@@ -18,11 +18,13 @@
 #include <tensor.h>
 
 #include <base/add.h>
+#include <base/add_rms_norm.h>
 #include <base/gemm.h>
 #include <base/rms_norm.h>
 #include <base/swiglu.h>
 
 #include <cuda/nvidia/add/kernel.h>
+#include <cuda/nvidia/add_rms_norm/kernel.h>
 #include <cuda/nvidia/gemm/cublas.h>
 #include <cuda/nvidia/rms_norm/kernel.h>
 #include <cuda/nvidia/swiglu/kernel.h>
@@ -71,6 +73,16 @@ void rms_norm(const infini::ops::Tensor &input,
               infini::ops::Tensor out, void *stream) {
     infini::ops::Operator<infini::ops::RmsNorm>::Call(
         make_handle(stream), native_config(), input, weight, eps, out);
+}
+
+void add_rms_norm(const infini::ops::Tensor &input,
+                  const infini::ops::Tensor &other,
+                  const infini::ops::Tensor &weight, float eps,
+                  infini::ops::Tensor out,
+                  infini::ops::Tensor residual_out, void *stream) {
+    infini::ops::Operator<infini::ops::AddRmsNorm>::Call(
+        make_handle(stream), native_config(), input, other, weight, eps, out,
+        residual_out);
 }
 
 void gemm(const infini::ops::Tensor &a, const infini::ops::Tensor &b,

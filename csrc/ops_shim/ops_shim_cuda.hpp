@@ -26,6 +26,12 @@ void rms_norm(const infini::ops::Tensor &input,
               const infini::ops::Tensor &weight, float eps,
               infini::ops::Tensor out, void *stream);
 
+void add_rms_norm(const infini::ops::Tensor &input,
+                  const infini::ops::Tensor &other,
+                  const infini::ops::Tensor &weight, float eps,
+                  infini::ops::Tensor out,
+                  infini::ops::Tensor residual_out, void *stream);
+
 void gemm(const infini::ops::Tensor &a, const infini::ops::Tensor &b,
           float alpha, float beta, int trans_a, int trans_b,
           infini::ops::Tensor c, void *stream);

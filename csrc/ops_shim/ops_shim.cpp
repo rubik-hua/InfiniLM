@@ -318,10 +318,20 @@ void rms_norm_forward_inplace(infinicore::Tensor &hidden_states,
         hidden_states = rms_norm(hidden_states, weight, eps);
     } else {
         // Subsequent layers: fuse `residual += hidden_states` with the norm
-        // by doing the add first and then normalizing the sum.
-        auto summed = add(hidden_states, residual);
-        residual = summed;
-        hidden_states = rms_norm(summed, weight, eps);
+        // via `AddRmsNorm`. One CUDA kernel instead of two, and the residual
+        // is written in-place so the single-pass kernel can share the load.
+        auto out = infinicore::Tensor::empty(hidden_states->shape(),
+                                             hidden_states->dtype(),
+                                             hidden_states->device());
+        auto new_residual = infinicore::Tensor::empty(hidden_states->shape(),
+                                                      hidden_states->dtype(),
+                                                      hidden_states->device());
+        cuda_dispatch::add_rms_norm(
+            to_ops_tensor(hidden_states), to_ops_tensor(residual),
+            to_ops_tensor(weight), eps, to_ops_tensor(out),
+            to_ops_tensor(new_residual), infinicore::context::getStream());
+        hidden_states = out;
+        residual = new_residual;
     }
 }
 
