@@ -284,14 +284,10 @@ void paged_caching_(infinicore::Tensor k_cache, infinicore::Tensor v_cache,
                     const infinicore::Tensor &k, const infinicore::Tensor &v,
                     const infinicore::Tensor &slot_mapping) {
     INFINILM_OPS_SHIM_PROFILE(kPagedCaching);
-    auto ops_k_cache = to_ops_tensor(k_cache);
-    auto ops_v_cache = to_ops_tensor(v_cache);
-    auto ops_k = to_ops_tensor(k);
-    auto ops_v = to_ops_tensor(v);
-    auto ops_slot_mapping = to_ops_tensor(slot_mapping);
-    infini::ops::Operator<infini::ops::PagedCaching>::Call(
-        make_handle(), make_config(), ops_k_cache, ops_v_cache, ops_k, ops_v,
-        ops_slot_mapping);
+    cuda_dispatch::paged_caching(
+        to_ops_tensor(k_cache), to_ops_tensor(v_cache), to_ops_tensor(k),
+        to_ops_tensor(v), to_ops_tensor(slot_mapping),
+        infinicore::context::getStream());
 }
 
 infinicore::Tensor mha_kvcache(const infinicore::Tensor &q,

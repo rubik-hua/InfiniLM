@@ -20,12 +20,14 @@
 #include <base/add.h>
 #include <base/add_rms_norm.h>
 #include <base/gemm.h>
+#include <base/paged_caching.h>
 #include <base/rms_norm.h>
 #include <base/swiglu.h>
 
 #include <cuda/nvidia/add/kernel.h>
 #include <cuda/nvidia/add_rms_norm/kernel.h>
 #include <cuda/nvidia/gemm/cublas.h>
+#include <cuda/nvidia/paged_caching/kernel.h>
 #include <cuda/nvidia/rms_norm/kernel.h>
 #include <cuda/nvidia/swiglu/kernel.h>
 
@@ -83,6 +85,15 @@ void add_rms_norm(const infini::ops::Tensor &input,
     infini::ops::Operator<infini::ops::AddRmsNorm>::Call(
         make_handle(stream), native_config(), input, other, weight, eps, out,
         residual_out);
+}
+
+void paged_caching(infini::ops::Tensor k_cache, infini::ops::Tensor v_cache,
+                   const infini::ops::Tensor &k,
+                   const infini::ops::Tensor &v,
+                   const infini::ops::Tensor &slot_mapping, void *stream) {
+    infini::ops::Operator<infini::ops::PagedCaching>::Call(
+        make_handle(stream), native_config(), k_cache, v_cache, k, v,
+        slot_mapping);
 }
 
 void gemm(const infini::ops::Tensor &a, const infini::ops::Tensor &b,
