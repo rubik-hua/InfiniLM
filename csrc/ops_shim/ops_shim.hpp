@@ -1,5 +1,6 @@
 #pragma once
 
+#include <infinicore/nn/rope.hpp>
 #include <infinicore/tensor.hpp>
 
 #include <optional>
@@ -68,5 +69,15 @@ infinicore::Tensor rms_norm(const infinicore::Tensor &input,
 void rms_norm_forward_inplace(infinicore::Tensor &hidden_states,
                               infinicore::Tensor &residual,
                               const infinicore::Tensor &weight, float eps);
+
+// Apply the `InfiniOps` `Rope` op using `module`'s pre-computed `sin` /
+// `cos` cache. When `out` is omitted, runs in place on `x` and returns
+// it; when provided, writes into `out` and returns it. This covers both
+// `infinicore::nn::RoPE::forward(x, pos, in_place)` and
+// `infinicore::nn::RoPE::forward(y, x, pos)`.
+infinicore::Tensor rope_forward(const infinicore::nn::RoPE &module,
+                                const infinicore::Tensor &x,
+                                const infinicore::Tensor &positions,
+                                std::optional<infinicore::Tensor> out = std::nullopt);
 
 } // namespace infinilm::ops_shim

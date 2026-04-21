@@ -15,6 +15,7 @@
 #include <base/paged_caching.h>
 #include <base/random_sample.h>
 #include <base/rms_norm.h>
+#include <base/rope.h>
 #include <base/swiglu.h>
 #include <tensor.h>
 
@@ -33,6 +34,7 @@
 #include <torch/paged_caching/paged_caching.h>
 #include <torch/random_sample/random_sample.h>
 #include <torch/rms_norm/rms_norm.h>
+#include <torch/rope/rope.h>
 #include <torch/swiglu/swiglu.h>
 
 // Each enabled-platform marker specializes `DeviceEnabled<Device::Type::X>`
@@ -325,6 +327,27 @@ void rms_norm_forward_inplace(infinicore::Tensor &hidden_states,
         residual = summed;
         hidden_states = rms_norm(summed, weight, eps);
     }
+}
+
+infinicore::Tensor rope_forward(const infinicore::nn::RoPE &module,
+                                const infinicore::Tensor &x,
+                                const infinicore::Tensor &positions,
+                                std::optional<infinicore::Tensor> out) {
+    const bool is_neox_style =
+        module.algo() == infinicore::nn::RoPE::Algo::GPT_NEOX;
+    auto destination = out.value_or(x);
+
+    auto ops_x = to_ops_tensor(x);
+    auto ops_positions = to_ops_tensor(positions);
+    auto ops_sin = to_ops_tensor(module.sin_cache());
+    auto ops_cos = to_ops_tensor(module.cos_cache());
+    auto ops_out = to_ops_tensor(destination);
+
+    infini::ops::Operator<infini::ops::Rope>::Call(
+        make_handle(), make_config(), ops_x, ops_positions, ops_sin, ops_cos,
+        is_neox_style, ops_out);
+
+    return destination;
 }
 
 } // namespace infinilm::ops_shim
