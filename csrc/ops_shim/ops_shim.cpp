@@ -8,6 +8,7 @@
 #include <handle.h>
 #include <operator.h>
 #include <base/add.h>
+#include <base/paged_caching.h>
 #include <base/swiglu.h>
 #include <tensor.h>
 
@@ -19,6 +20,7 @@
 // "no allowed values registered for value N in the context:
 // Operator::Make(implementation_index)".
 #include <torch/add/add.h>
+#include <torch/paged_caching/paged_caching.h>
 #include <torch/swiglu/swiglu.h>
 
 // Each enabled-platform marker specializes `DeviceEnabled<Device::Type::X>`
@@ -153,6 +155,19 @@ infinicore::Tensor swiglu(const infinicore::Tensor &input, const infinicore::Ten
     auto ops_out = to_ops_tensor(out);
     infini::ops::Operator<infini::ops::Swiglu>::Call(make_handle(), make_config(), ops_input, ops_gate, ops_out);
     return out;
+}
+
+void paged_caching_(infinicore::Tensor k_cache, infinicore::Tensor v_cache,
+                    const infinicore::Tensor &k, const infinicore::Tensor &v,
+                    const infinicore::Tensor &slot_mapping) {
+    auto ops_k_cache = to_ops_tensor(k_cache);
+    auto ops_v_cache = to_ops_tensor(v_cache);
+    auto ops_k = to_ops_tensor(k);
+    auto ops_v = to_ops_tensor(v);
+    auto ops_slot_mapping = to_ops_tensor(slot_mapping);
+    infini::ops::Operator<infini::ops::PagedCaching>::Call(
+        make_handle(), make_config(), ops_k_cache, ops_v_cache, ops_k, ops_v,
+        ops_slot_mapping);
 }
 
 } // namespace infinilm::ops_shim

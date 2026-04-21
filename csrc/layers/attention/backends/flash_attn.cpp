@@ -1,5 +1,6 @@
 #include "flash_attn.hpp"
 
+#include "../../../ops_shim/ops_shim.hpp"
 #include "../../../utils.hpp"
 #include "infinicore/ops.hpp"
 #include "infinicore/ops/mha_kvcache.hpp"
@@ -90,7 +91,7 @@ std::tuple<infinicore::Tensor, infinicore::Tensor> FlashAttentionImpl::do_kv_cac
                                                                                           const infinicore::Tensor slot_mapping) const {
     auto k_cache_layer = kv_cache->narrow({{0, 0, 1}})->squeeze(0);
     auto v_cache_layer = kv_cache->narrow({{0, 1, 1}})->squeeze(0);
-    infinicore::op::paged_caching_(
+    infinilm::ops_shim::paged_caching_(
         k_cache_layer,
         v_cache_layer,
         key,

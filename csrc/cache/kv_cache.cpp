@@ -1,6 +1,7 @@
 #include "kv_cache.hpp"
 
 #include "../global_state/global_state.hpp"
+#include "../ops_shim/ops_shim.hpp"
 #include "../utils.hpp"
 #include "infinicore/ops.hpp"
 #include <stdexcept>
@@ -264,7 +265,7 @@ std::tuple<infinicore::Tensor, infinicore::Tensor> PagedKVCache::update(
 
     auto &&[k_cache_layer, v_cache_layer] = get_paged_kv(layer_idx);
 
-    infinicore::op::paged_caching_(
+    infinilm::ops_shim::paged_caching_(
         k_cache_layer,
         v_cache_layer,
         k,
