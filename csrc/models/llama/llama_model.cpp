@@ -1,8 +1,8 @@
 #include "llama_model.hpp"
+#include "../../ops_shim/ops_shim.hpp"
 #include "infinicore/nn/embedding.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/nn/rope.hpp"
-#include "infinicore/ops.hpp"
 #include <iostream>
 
 namespace infinilm::models::llama {
@@ -98,7 +98,7 @@ infinicore::Tensor LlamaModel::forward(const infinicore::Tensor &input_ids,
                                        std::optional<infinicore::Tensor> block_tables,
                                        std::optional<infinicore::Tensor> slot_mapping) const {
     // 1. Embed tokens: input_ids -> [batch, seq_len, hidden_size]
-    auto hidden_states = embed_tokens_->forward(input_ids);
+    auto hidden_states = infinilm::ops_shim::embedding(input_ids, embed_tokens_->weight());
 
     // 2. Process through all decoder layers
     size_t num_layers = layers_.size();

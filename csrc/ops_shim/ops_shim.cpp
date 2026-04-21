@@ -8,6 +8,7 @@
 #include <handle.h>
 #include <operator.h>
 #include <base/add.h>
+#include <base/embedding.h>
 #include <base/mha_kvcache.h>
 #include <base/mha_varlen.h>
 #include <base/paged_caching.h>
@@ -23,6 +24,7 @@
 // "no allowed values registered for value N in the context:
 // Operator::Make(implementation_index)".
 #include <torch/add/add.h>
+#include <torch/embedding/embedding.h>
 #include <torch/mha_kvcache/mha_kvcache.h>
 #include <torch/mha_varlen/mha_varlen.h>
 #include <torch/paged_caching/paged_caching.h>
@@ -223,6 +225,21 @@ void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
     infini::ops::Operator<infini::ops::RandomSample>::Call(
         make_handle(), make_config(), ops_logits, random_val, topp, topk,
         temperature, ops_out);
+}
+
+infinicore::Tensor embedding(const infinicore::Tensor &indices,
+                             const infinicore::Tensor &weight) {
+    // Output shape: `indices.shape() + [embedding_dim]`.
+    auto out_shape = indices->shape();
+    out_shape.push_back(weight->shape().back());
+    auto out = infinicore::Tensor::empty(out_shape, weight->dtype(), weight->device());
+
+    auto ops_indices = to_ops_tensor(indices);
+    auto ops_weight = to_ops_tensor(weight);
+    auto ops_out = to_ops_tensor(out);
+    infini::ops::Operator<infini::ops::Embedding>::Call(
+        make_handle(), make_config(), ops_indices, ops_weight, ops_out);
+    return out;
 }
 
 } // namespace infinilm::ops_shim

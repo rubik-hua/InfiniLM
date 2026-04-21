@@ -39,4 +39,9 @@ void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
                     float random_val, float topp, int topk,
                     float temperature);
 
+// Embedding lookup `weight[indices]`. `indices` can have any shape; the
+// output shape is `indices.shape() + [embedding_dim]`.
+infinicore::Tensor embedding(const infinicore::Tensor &indices,
+                             const infinicore::Tensor &weight);
+
 } // namespace infinilm::ops_shim

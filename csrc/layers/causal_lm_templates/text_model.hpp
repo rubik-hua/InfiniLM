@@ -2,6 +2,7 @@
 
 #include "../../config/model_config.hpp"
 #include "../../models/infinilm_model.hpp"
+#include "../../ops_shim/ops_shim.hpp"
 #include "infinicore/nn/embedding.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/tensor.hpp"
@@ -47,7 +48,7 @@ public:
         auto input_ids = input.input_ids.value();
         auto positions = input.position_ids.value();
         // 1. Embed tokens: input_ids -> [batch, seq_len, hidden_size]
-        auto hidden_states = embed_tokens_->forward(input_ids);
+        auto hidden_states = infinilm::ops_shim::embedding(input_ids, embed_tokens_->weight());
 
         // 2. Process through all decoder layers
         size_t num_layers = layers_.size();
@@ -66,7 +67,7 @@ public:
     infinicore::Tensor forward_naive(const infinilm::InfinilmModel::Input &input) const {
         auto input_ids = input.input_ids.value();
         auto positions = input.position_ids.value();
-        auto hidden_states = embed_tokens_->forward(input_ids);
+        auto hidden_states = infinilm::ops_shim::embedding(input_ids, embed_tokens_->weight());
         size_t num_layers = layers_.size();
         for (size_t i = 0; i < num_layers; ++i) {
             hidden_states = layers_.at(i)->forward(positions, hidden_states);
