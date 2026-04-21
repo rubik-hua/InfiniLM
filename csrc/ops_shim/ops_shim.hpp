@@ -34,4 +34,9 @@ void mha_varlen_(infinicore::Tensor out,
                  const infinicore::Tensor &block_table,
                  float scale);
 
+// Sample one index from `logits` into a 0D `out` tensor.
+void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
+                    float random_val, float topp, int topk,
+                    float temperature);
+
 } // namespace infinilm::ops_shim

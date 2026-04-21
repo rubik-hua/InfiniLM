@@ -3,7 +3,7 @@
 #include "../global_state/global_state.hpp"
 #include "../models/model_factory.hpp"
 #include "../models/models_registry.hpp"
-#include "infinicore/ops.hpp"
+#include "../ops_shim/ops_shim.hpp"
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -380,7 +380,7 @@ void RankWorker::thread_loop() {
                                 auto score{logits->view({batch_size * total_len, vocab_size})->narrow({{0, size_t(input_offsets[i + 1] - 1), 1}})->view({vocab_size})};
                                 auto out{output_ids->narrow({{0, i, 1}})->view({})};
                                 float random_val = std::uniform_real_distribution<float>(0, 1)(rng_);
-                                infinicore::op::random_sample_(
+                                infinilm::ops_shim::random_sample_(
                                     out, score, random_val, top_p, top_k, temperature);
                             }
 

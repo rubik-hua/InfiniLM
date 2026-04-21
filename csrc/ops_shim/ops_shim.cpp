@@ -11,6 +11,7 @@
 #include <base/mha_kvcache.h>
 #include <base/mha_varlen.h>
 #include <base/paged_caching.h>
+#include <base/random_sample.h>
 #include <base/swiglu.h>
 #include <tensor.h>
 
@@ -25,6 +26,7 @@
 #include <torch/mha_kvcache/mha_kvcache.h>
 #include <torch/mha_varlen/mha_varlen.h>
 #include <torch/paged_caching/paged_caching.h>
+#include <torch/random_sample/random_sample.h>
 #include <torch/swiglu/swiglu.h>
 
 // Each enabled-platform marker specializes `DeviceEnabled<Device::Type::X>`
@@ -211,6 +213,16 @@ void mha_varlen_(infinicore::Tensor out,
     infini::ops::Operator<infini::ops::MhaVarlen>::Call(
         make_handle(), make_config(), ops_q, ops_k_cache, ops_v_cache,
         ops_cum_seqlens_q, ops_cum_seqlens_k, ops_block_table, scale, ops_out);
+}
+
+void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
+                    float random_val, float topp, int topk,
+                    float temperature) {
+    auto ops_logits = to_ops_tensor(logits);
+    auto ops_out = to_ops_tensor(out);
+    infini::ops::Operator<infini::ops::RandomSample>::Call(
+        make_handle(), make_config(), ops_logits, random_val, topp, topk,
+        temperature, ops_out);
 }
 
 } // namespace infinilm::ops_shim
