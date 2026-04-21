@@ -1,6 +1,6 @@
 #include "moe_mlp.hpp"
 #include "../../global_state/global_state.hpp"
-#include "infinicore/ops.hpp"
+#include "../../ops_shim/ops_shim.hpp"
 
 namespace infinilm::layers::moe_mlp {
 
@@ -39,7 +39,7 @@ infinicore::Tensor MoeMLP::forward(const infinicore::Tensor &hidden_states) cons
     auto hidden_states_mutable = hidden_states;
     auto gate = gate_proj_->forward(hidden_states_mutable);
     auto up = up_proj_->forward(hidden_states_mutable);
-    auto intermediate = infinicore::op::swiglu(up, gate);
+    auto intermediate = infinilm::ops_shim::swiglu(up, gate);
     auto output = down_proj_->forward(intermediate);
     return output;
 }

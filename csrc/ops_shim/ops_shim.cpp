@@ -8,7 +8,28 @@
 #include <handle.h>
 #include <operator.h>
 #include <base/add.h>
+#include <base/swiglu.h>
 #include <tensor.h>
+
+// SFINAE-based discovery of `Operator<Op, Dev, N>` specializations happens at
+// template instantiation time in this translation unit, so each backend
+// implementation header must be visible here. Without these includes,
+// `ActiveImplementations<Op, Dev>::type` resolves to `List<>` and
+// `Operator<Op>::Call` fails with
+// "no allowed values registered for value N in the context:
+// Operator::Make(implementation_index)".
+#include <torch/add/add.h>
+#include <torch/swiglu/swiglu.h>
+
+// Each enabled-platform marker specializes `DeviceEnabled<Device::Type::X>`
+// so that `ActiveDevices<Key>` picks up `X` at template instantiation time.
+// These specializations are header-only, so they must be visible in this
+// translation unit — linking against `libinfiniops.so` alone is not enough.
+// Mirror the platforms enabled by `InfiniOps`' own build.
+#include <cpu/device_.h>
+#if defined(WITH_NVIDIA)
+#include <cuda/nvidia/device_.h>
+#endif
 
 #include <stdexcept>
 
@@ -123,6 +144,15 @@ infinicore::Tensor add(const infinicore::Tensor &a, const infinicore::Tensor &b)
     auto ops_c = to_ops_tensor(c);
     infini::ops::Operator<infini::ops::Add>::Call(make_handle(), make_config(), ops_a, ops_b, ops_c);
     return c;
+}
+
+infinicore::Tensor swiglu(const infinicore::Tensor &input, const infinicore::Tensor &gate) {
+    auto out = infinicore::Tensor::empty(input->shape(), input->dtype(), input->device());
+    auto ops_input = to_ops_tensor(input);
+    auto ops_gate = to_ops_tensor(gate);
+    auto ops_out = to_ops_tensor(out);
+    infini::ops::Operator<infini::ops::Swiglu>::Call(make_handle(), make_config(), ops_input, ops_gate, ops_out);
+    return out;
 }
 
 } // namespace infinilm::ops_shim

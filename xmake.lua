@@ -81,11 +81,15 @@ target("_infinilm")
     add_linkdirs(INFINI_ROOT.."/lib")
     add_links("infinicore_cpp_api", "infiniop", "infinirt", "infiniccl")
 
-    -- `InfiniOps` headers (via the source tree) and built library.
+    -- `InfiniOps` headers (via the source tree) and built library. The
+    -- `WITH_*` defines mirror the platforms `InfiniOps` was built with so
+    -- that `ops_shim.cpp` registers the right `DeviceEnabled` specializations
+    -- (see `csrc/ops_shim/ops_shim.cpp`).
     add_includedirs(INFINIOPS_ROOT.."/src", { public = false })
     add_linkdirs(INFINIOPS_ROOT.."/build/src")
     add_links("infiniops")
     add_rpathdirs(INFINIOPS_ROOT.."/build/src")
+    add_defines("WITH_NVIDIA=1")
 
     -- Add src files
     add_files("csrc/**.cpp")
