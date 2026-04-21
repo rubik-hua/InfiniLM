@@ -2,6 +2,8 @@
 
 #include <infinicore/tensor.hpp>
 
+#include <optional>
+
 namespace infinilm::ops_shim {
 
 // Compute `a + b` via the `InfiniOps` `Add` operator.
@@ -43,5 +45,14 @@ void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
 // output shape is `indices.shape() + [embedding_dim]`.
 infinicore::Tensor embedding(const infinicore::Tensor &indices,
                              const infinicore::Tensor &weight);
+
+// Dense linear: `out = input @ weight.T [+ bias]`.
+//   `input`:  `[..., in_features]`.
+//   `weight`: `[out_features, in_features]`.
+//   `bias`:   `[out_features]` (optional).
+// Returns a tensor of shape `input.shape()[:-1] + [out_features]`.
+infinicore::Tensor linear(const infinicore::Tensor &input,
+                          const infinicore::Tensor &weight,
+                          const std::optional<infinicore::Tensor> &bias = std::nullopt);
 
 } // namespace infinilm::ops_shim

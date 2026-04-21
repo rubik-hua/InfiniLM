@@ -1,5 +1,6 @@
 #include "llama_attention.hpp"
 
+#include "../../ops_shim/ops_shim.hpp"
 #include "../../utils.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/nn/rope.hpp"
@@ -263,7 +264,11 @@ infinicore::Tensor LlamaAttention::forward_(const infinicore::Tensor &hidden_sta
                           ->view({batch_size, seq_len, num_attention_heads_ * head_dim_}); // [bs, seq_len, n_q_head * head_dim]
     }
 
-    auto output = o_proj_->forward(attn_output);
+    std::optional<infinicore::Tensor> o_proj_bias = std::nullopt;
+    if (o_proj_->has_bias()) {
+        o_proj_bias = o_proj_->bias();
+    }
+    auto output = infinilm::ops_shim::linear(attn_output, o_proj_->weight(), o_proj_bias);
 
     return output;
 }
@@ -392,7 +397,11 @@ infinicore::Tensor LlamaAttention::forward_paged_(const infinicore::Tensor &hidd
     // 7. Project output
     attn_output
         = attn_output->view({1, seq_len, num_attention_heads_ * head_dim_});
-    return o_proj_->forward(attn_output);
+    std::optional<infinicore::Tensor> o_proj_bias = std::nullopt;
+    if (o_proj_->has_bias()) {
+        o_proj_bias = o_proj_->bias();
+    }
+    return infinilm::ops_shim::linear(attn_output, o_proj_->weight(), o_proj_bias);
 }
 
 infinicore::Tensor LlamaAttention::forward(const infinicore::Tensor &hidden_states,

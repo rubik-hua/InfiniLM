@@ -9,6 +9,7 @@
 #include <operator.h>
 #include <base/add.h>
 #include <base/embedding.h>
+#include <base/gemm.h>
 #include <base/mha_kvcache.h>
 #include <base/mha_varlen.h>
 #include <base/paged_caching.h>
@@ -25,6 +26,7 @@
 // Operator::Make(implementation_index)".
 #include <torch/add/add.h>
 #include <torch/embedding/embedding.h>
+#include <torch/gemm/gemm.h>
 #include <torch/mha_kvcache/mha_kvcache.h>
 #include <torch/mha_varlen/mha_varlen.h>
 #include <torch/paged_caching/paged_caching.h>
@@ -128,10 +130,11 @@ infini::ops::Tensor to_ops_tensor(const infinicore::Tensor &tensor) {
         tensor->strides()};
 }
 
-// The `PyTorch` backend is registered as implementation index `1`. We route
-// all calls through that backend for consistency, which also guarantees that
-// ops like `Embedding` (which currently only exist there) stay reachable.
+// Most `InfiniOps` operators place their PyTorch backend at implementation
+// index `1`. `Gemm` is the exception: it has two CUDA backends (`cublas` and
+// `cublasLt`) at indices `0` and `1`, and the PyTorch backend at index `2`.
 constexpr std::size_t kTorchImplementationIndex = 1;
+constexpr std::size_t kGemmTorchImplementationIndex = 2;
 
 infini::ops::Handle make_handle() {
     infini::ops::Handle handle;
@@ -139,9 +142,9 @@ infini::ops::Handle make_handle() {
     return handle;
 }
 
-infini::ops::Config make_config() {
+infini::ops::Config make_config(std::size_t implementation_index = kTorchImplementationIndex) {
     infini::ops::Config config;
-    config.set_implementation_index(kTorchImplementationIndex);
+    config.set_implementation_index(implementation_index);
     return config;
 }
 
@@ -239,6 +242,58 @@ infinicore::Tensor embedding(const infinicore::Tensor &indices,
     auto ops_out = to_ops_tensor(out);
     infini::ops::Operator<infini::ops::Embedding>::Call(
         make_handle(), make_config(), ops_indices, ops_weight, ops_out);
+    return out;
+}
+
+infinicore::Tensor linear(const infinicore::Tensor &input,
+                          const infinicore::Tensor &weight,
+                          const std::optional<infinicore::Tensor> &bias) {
+    const auto &input_shape = input->shape();
+    const auto &weight_shape = weight->shape();
+    const auto out_features = weight_shape[0];
+    const auto in_features = weight_shape[1];
+
+    auto out_shape = input_shape;
+    out_shape.back() = out_features;
+    auto out = infinicore::Tensor::empty(out_shape, input->dtype(), input->device());
+
+    // Flatten the leading dims for a 2D `addmm`. `input`/`weight` must be
+    // contiguous so the 2D view is sound.
+    infinicore::Size n = 1;
+    for (size_t i = 0; i + 1 < input_shape.size(); ++i) {
+        n *= input_shape[i];
+    }
+    auto input_contig = input->is_contiguous() ? input : input->contiguous();
+    auto weight_contig = weight->is_contiguous() ? weight : weight->contiguous();
+    auto input_2d = input_contig->view({n, in_features});
+    auto out_2d = out->view({n, out_features});
+
+    float beta = 0.0f;
+    if (bias.has_value()) {
+        // Broadcast `bias` into `out_2d` (shape `[n, out_features]`) by
+        // copying through a strided view, then blend it into the `Gemm`
+        // via `beta = 1`.
+        auto bias_broadcast =
+            bias.value()->as_strided({n, out_features}, {0, 1});
+        out_2d->copy_from(bias_broadcast);
+        beta = 1.0f;
+    }
+
+    auto ops_input = to_ops_tensor(input_2d);
+    auto ops_weight = to_ops_tensor(weight_contig);
+    auto ops_out = to_ops_tensor(out_2d);
+
+    // `Gemm(a, b, alpha, beta, trans_a, trans_b, c)`:
+    //   `c = alpha * op(a) @ op(b) + beta * c`.
+    // With `trans_b = 1` we compute `input @ weight.T` in one step.
+    infini::ops::Operator<infini::ops::Gemm>::Call(
+        make_handle(), make_config(kGemmTorchImplementationIndex), ops_input,
+        ops_weight,
+        /*alpha=*/std::optional<float>{1.0f},
+        /*beta=*/std::optional<float>{beta},
+        /*trans_a=*/std::optional<int>{0},
+        /*trans_b=*/std::optional<int>{1}, ops_out);
+
     return out;
 }
 

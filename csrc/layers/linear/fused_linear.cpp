@@ -1,5 +1,6 @@
 #include "fused_linear.hpp"
 
+#include "../../ops_shim/ops_shim.hpp"
 #include <spdlog/spdlog.h>
 
 namespace infinilm::layers::linear {
@@ -124,7 +125,11 @@ QKVParallelLinear::QKVParallelLinear(size_t hidden_size,
 
 std::tuple<infinicore::Tensor, infinicore::Tensor, infinicore::Tensor>
 QKVParallelLinear::forward_split(infinicore::Tensor &input) {
-    auto output = this->forward(input);
+    std::optional<infinicore::Tensor> bias_opt = std::nullopt;
+    if (has_bias_) {
+        bias_opt = static_cast<const infinicore::Tensor &>(bias_);
+    }
+    auto output = infinilm::ops_shim::linear(input, static_cast<const infinicore::Tensor &>(weight_), bias_opt);
 
     auto q_out = output->narrow({{2, 0, q_out_size_}});
     auto k_out = output->narrow({{2, q_out_size_, k_out_size_}});
@@ -315,7 +320,11 @@ GateUpParallelLinear::GateUpParallelLinear(size_t hidden_size, size_t intermedia
 }
 
 std::tuple<infinicore::Tensor, infinicore::Tensor> GateUpParallelLinear::forward_split(infinicore::Tensor &input) {
-    auto output = this->forward(input);
+    std::optional<infinicore::Tensor> bias_opt = std::nullopt;
+    if (has_bias_) {
+        bias_opt = static_cast<const infinicore::Tensor &>(bias_);
+    }
+    auto output = infinilm::ops_shim::linear(input, static_cast<const infinicore::Tensor &>(weight_), bias_opt);
     auto cols = output->shape()[2];
     auto gate_output = output->narrow({{2, 0, cols / 2}});
     auto up_output = output->narrow({{2, cols / 2, cols / 2}});

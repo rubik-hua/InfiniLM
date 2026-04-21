@@ -1,7 +1,7 @@
 #include "llama_for_causal_lm.hpp"
+#include "../../ops_shim/ops_shim.hpp"
 #include "infinicore/context/context.hpp"
 #include "infinicore/nn/linear.hpp"
-#include "infinicore/ops.hpp"
 namespace infinilm::models::llama {
 /**
  * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).
@@ -69,7 +69,11 @@ LlamaForCausalLM::Output LlamaForCausalLM::forward(const Input &input) const {
         input_ids, position_ids, past_sequence_lengths, total_sequence_length, input_offsets, cu_seqlens, block_tables, slot_mapping);
 
     // 2. Apply language modeling head to get logits
-    auto logits = lm_head_->forward(hidden_states);
+    std::optional<infinicore::Tensor> lm_head_bias = std::nullopt;
+    if (lm_head_->has_bias()) {
+        lm_head_bias = lm_head_->bias();
+    }
+    auto logits = infinilm::ops_shim::linear(hidden_states, lm_head_->weight(), lm_head_bias);
     return {logits};
 }
 

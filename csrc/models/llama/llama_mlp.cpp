@@ -81,7 +81,11 @@ infinicore::Tensor LlamaMLP::forward(const infinicore::Tensor &hidden_states) co
     auto intermediate = infinilm::ops_shim::swiglu(up, gate);
 
     // 3. Project down
-    auto output = down_proj_->forward(intermediate);
+    std::optional<infinicore::Tensor> down_bias = std::nullopt;
+    if (down_proj_->has_bias()) {
+        down_bias = down_proj_->bias();
+    }
+    auto output = infinilm::ops_shim::linear(intermediate, down_proj_->weight(), down_bias);
 
     return output;
 }
