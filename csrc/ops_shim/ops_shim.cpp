@@ -8,6 +8,8 @@
 #include <handle.h>
 #include <operator.h>
 #include <base/add.h>
+#include <base/mha_kvcache.h>
+#include <base/mha_varlen.h>
 #include <base/paged_caching.h>
 #include <base/swiglu.h>
 #include <tensor.h>
@@ -20,6 +22,8 @@
 // "no allowed values registered for value N in the context:
 // Operator::Make(implementation_index)".
 #include <torch/add/add.h>
+#include <torch/mha_kvcache/mha_kvcache.h>
+#include <torch/mha_varlen/mha_varlen.h>
 #include <torch/paged_caching/paged_caching.h>
 #include <torch/swiglu/swiglu.h>
 
@@ -168,6 +172,45 @@ void paged_caching_(infinicore::Tensor k_cache, infinicore::Tensor v_cache,
     infini::ops::Operator<infini::ops::PagedCaching>::Call(
         make_handle(), make_config(), ops_k_cache, ops_v_cache, ops_k, ops_v,
         ops_slot_mapping);
+}
+
+infinicore::Tensor mha_kvcache(const infinicore::Tensor &q,
+                               const infinicore::Tensor &k_cache,
+                               const infinicore::Tensor &v_cache,
+                               const infinicore::Tensor &seqlens_k,
+                               const infinicore::Tensor &block_table,
+                               float scale) {
+    auto out = infinicore::Tensor::empty(q->shape(), q->dtype(), q->device());
+    auto ops_q = to_ops_tensor(q);
+    auto ops_k_cache = to_ops_tensor(k_cache);
+    auto ops_v_cache = to_ops_tensor(v_cache);
+    auto ops_seqlens_k = to_ops_tensor(seqlens_k);
+    auto ops_block_table = to_ops_tensor(block_table);
+    auto ops_out = to_ops_tensor(out);
+    infini::ops::Operator<infini::ops::MhaKvcache>::Call(
+        make_handle(), make_config(), ops_q, ops_k_cache, ops_v_cache,
+        ops_seqlens_k, ops_block_table, scale, ops_out);
+    return out;
+}
+
+void mha_varlen_(infinicore::Tensor out,
+                 const infinicore::Tensor &q,
+                 const infinicore::Tensor &k_cache,
+                 const infinicore::Tensor &v_cache,
+                 const infinicore::Tensor &cum_seqlens_q,
+                 const infinicore::Tensor &cum_seqlens_k,
+                 const infinicore::Tensor &block_table,
+                 float scale) {
+    auto ops_q = to_ops_tensor(q);
+    auto ops_k_cache = to_ops_tensor(k_cache);
+    auto ops_v_cache = to_ops_tensor(v_cache);
+    auto ops_cum_seqlens_q = to_ops_tensor(cum_seqlens_q);
+    auto ops_cum_seqlens_k = to_ops_tensor(cum_seqlens_k);
+    auto ops_block_table = to_ops_tensor(block_table);
+    auto ops_out = to_ops_tensor(out);
+    infini::ops::Operator<infini::ops::MhaVarlen>::Call(
+        make_handle(), make_config(), ops_q, ops_k_cache, ops_v_cache,
+        ops_cum_seqlens_q, ops_cum_seqlens_k, ops_block_table, scale, ops_out);
 }
 
 } // namespace infinilm::ops_shim

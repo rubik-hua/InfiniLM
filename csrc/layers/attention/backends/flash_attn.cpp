@@ -2,9 +2,6 @@
 
 #include "../../../ops_shim/ops_shim.hpp"
 #include "../../../utils.hpp"
-#include "infinicore/ops.hpp"
-#include "infinicore/ops/mha_kvcache.hpp"
-#include "infinicore/ops/mha_varlen.hpp"
 
 namespace infinilm::layers::attention::backends {
 
@@ -51,7 +48,7 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
     // 2. Compute attention
     infinicore::Tensor attn_output = infinicore::Tensor::empty({seq_len, num_heads_, head_dim_}, query->dtype(), query->device());
     if (is_prefill) {
-        infinicore::op::mha_varlen_(
+        infinilm::ops_shim::mha_varlen_(
             attn_output,
             query,
             k_total->permute({0, 2, 1, 3}),
@@ -59,24 +56,19 @@ infinicore::Tensor FlashAttentionImpl::forward(const AttentionLayer &layer,
             input_offsets.value(),
             cu_seqlens.value(),
             block_tables.value(),
-            max_position_embeddings_,
-            max_position_embeddings_,
-            std::nullopt,
             scale_);
     } else {
-        // FA2 decode path: flash::mha_fwd_kvcache
-        // In paged-attn mode, seq_len = actual batch_size (one query token per sequence).
+        // Decode path: single query token per sequence.
         // q_reshaped: [seq_len, num_heads, head_dim] → [seq_len, 1, num_heads, head_dim]
         // k/v cache:  [num_blocks, num_kv_heads, block_size, head_dim]
         //           → permute {0,2,1,3} → [num_blocks, block_size, num_kv_heads, head_dim]
         auto q_for_fa = query->view({seq_len, 1, num_heads_, head_dim_});
-        auto attn_out_4d = infinicore::op::mha_kvcache(
+        auto attn_out_4d = infinilm::ops_shim::mha_kvcache(
             q_for_fa,
             k_total->permute({0, 2, 1, 3}), // [num_blocks, block_size, num_kv_heads, head_dim]
             v_total->permute({0, 2, 1, 3}),
             total_sequence_lengths.value(), // [seq_len] int32 (one entry per sequence)
             block_tables.value(),           // [seq_len, max_num_blocks_per_seq] int32
-            std::nullopt,
             scale_);
         attn_output = attn_out_4d->view({seq_len, num_heads_, head_dim_});
     }

@@ -16,4 +16,22 @@ void paged_caching_(infinicore::Tensor k_cache, infinicore::Tensor v_cache,
                     const infinicore::Tensor &k, const infinicore::Tensor &v,
                     const infinicore::Tensor &slot_mapping);
 
+// Decode-time multi-head attention over a paged KV cache.
+infinicore::Tensor mha_kvcache(const infinicore::Tensor &q,
+                               const infinicore::Tensor &k_cache,
+                               const infinicore::Tensor &v_cache,
+                               const infinicore::Tensor &seqlens_k,
+                               const infinicore::Tensor &block_table,
+                               float scale);
+
+// Prefill-time variable-length multi-head attention over a paged KV cache.
+void mha_varlen_(infinicore::Tensor out,
+                 const infinicore::Tensor &q,
+                 const infinicore::Tensor &k_cache,
+                 const infinicore::Tensor &v_cache,
+                 const infinicore::Tensor &cum_seqlens_q,
+                 const infinicore::Tensor &cum_seqlens_k,
+                 const infinicore::Tensor &block_table,
+                 float scale);
+
 } // namespace infinilm::ops_shim
