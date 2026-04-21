@@ -6,6 +6,7 @@ import psutil
 import os
 from dataclasses import dataclass, field
 import infinicore
+from urllib3.util import parse_url
 
 EngineId = str
 import logging
@@ -53,10 +54,7 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
 
-    print(f"split_zmq_path : --------------------------> ?? path: {path}")
     parsed = parse_url(path)
-
-    print("split_zmq_path : --------------------------> ok")
 
     if not parsed.scheme:
         raise ValueError(f"Invalid zmq path: {path}")

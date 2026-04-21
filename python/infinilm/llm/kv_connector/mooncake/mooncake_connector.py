@@ -5,7 +5,7 @@ from infinilm.llm.kv_connector.base import (
 )
 
 from typing import TYPE_CHECKING, Any, Optional
-
+from collections import defaultdict
 import infinicore
 import httpx
 import msgspec
@@ -86,23 +86,31 @@ class MooncakeAgentMetadata(
 
 
 @dataclass
-class RecvReqMeta:
-    local_block_ids: list[int]
-    remote_host: str
-    remote_port: int
-
-
-@dataclass
 class SendBlockMeta:
+    """Prefill 侧按 transfer_id 聚合的发送状态（异步 Event 与块列表）。"""
+
+    p_req_id: ReqId
+    transfer_id: TransferId
     local_block_ids: list[int]
     ready: asyncio.Event
     expire_time: float = float("inf")
+    need_send: int = 0  # 异构 TP 时需发送的目标份数（当前实现多为 1）
+    sent: int = 0
+    sending: int = 0  # 正在进行的传输数，用于超时判断
+
+
+@dataclass
+class MooncakeConnectorOutput:
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
+    test_flag: str = "not_init"
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
-        self.reqs_to_recv: dict[ReqId, RecvReqMeta] = {}
-        self.reqs_to_send: dict[ReqId, list[int]] = {}
+        self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
+        self.reqs_to_send: dict[ReqId, tuple[TransferId, list[int]]] = {}
+        self.reqs_not_processed: set[TransferId] = set()
 
     def add_new_req(
         self,
@@ -111,19 +119,31 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         load_remote_cache: bool = True,
     ):
+        transfer_id = kv_transfer_params["transfer_id"]
         if load_remote_cache:
-            self.reqs_to_recv[request_id] = RecvReqMeta(
+            remote_engine_id = kv_transfer_params["remote_engine_id"]
+            self.reqs_to_recv[remote_engine_id][request_id] = PullReqMeta(
+                d_req_id=request_id,
                 local_block_ids=local_block_ids,
-                remote_host=kv_transfer_params["remote_host"],
-                remote_port=kv_transfer_params["remote_port"],
+                remote_engine_id=remote_engine_id,
+                remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
+                transfer_id=transfer_id,
             )
         else:
-            self.reqs_to_send[request_id] = local_block_ids
+            self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
+
+    def __str__(self) -> str:
+        return (
+            f"MooncakeConnectorMetadata(reqs_to_recv={dict(self.reqs_to_recv)}, "
+            f"reqs_to_send={self.reqs_to_send}, "
+            f"reqs_not_processed={self.reqs_not_processed})"
+        )
 
 
 class MooncakeConnector(KVConnectorBase):
     def __init__(self, config: "EngineConfig", role: KVConnectorRole):
         super().__init__(role)
+        self.config = config
         # TODO: 一些初始化代码
         # 为了能够初始化，应该需要修 infinilm 中的代码调整一下config参数
         engine_id = config.kv_transfer_config.engine_id  # TODO 再确认下engine_id的含义

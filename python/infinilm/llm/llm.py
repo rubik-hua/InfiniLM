@@ -81,6 +81,8 @@ class LLMEngine:
                 block_size=config.block_size,
             )
             logger.info(f"Using Paged KV Cache with num_blocks={config.num_blocks}")
+            if False:
+                self.scheduler.set_kv_connector(self.kv_connector)
         else:
             raise ValueError(f"Unsupported cache_type: {config.cache_type}")
 
@@ -143,7 +145,8 @@ class LLMEngine:
             return [], []
 
         # Execute model via Worker → ModelRunner (+ KV connector hooks)
-        sampled_tokens_list = self.worker.execute_model(scheduler_output)
+        model_runner_output = self.worker.execute_model(scheduler_output)
+        sampled_tokens_list = model_runner_output.sampled_token_ids
 
         # Update request status
         pending = self._update_requests(
@@ -151,6 +154,29 @@ class LLMEngine:
             scheduler_output.scheduled_requests,
             sampled_tokens_list,
         )
+
+        if False:
+            if self.kv_connector is not None:
+                for req in scheduler_output.scheduled_requests:
+                    self.kv_connector.request_finished(req, req.block_table)
+
+            if self.kv_connector is not None:
+                time.sleep(1)
+                connector_meta = self.kv_connector.build_connector_meta(
+                    "scheduler_output"
+                )
+
+                from infinilm.llm.scheduler import SchedulerOutput
+
+                scheduler_output_empty = SchedulerOutput([], False, connector_meta)
+
+                print(
+                    "----------> scheduler_output_empty  ",
+                    scheduler_output_empty.kv_connector_metadata,
+                )
+                model_runner_output_empty = self.worker.execute_model(
+                    scheduler_output_empty
+                )
 
         return scheduler_output.scheduled_requests, pending
 

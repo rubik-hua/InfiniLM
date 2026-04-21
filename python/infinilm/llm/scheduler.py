@@ -19,10 +19,12 @@ class SchedulerOutput:
         self,
         scheduled_requests: List[InferenceRequest],
         is_prefill: bool = False,
+        kv_connector_metadata=None,
     ):
         self.scheduled_requests = scheduled_requests
         self.num_requests = len(scheduled_requests)
         self.is_prefill = is_prefill
+        self.kv_connector_metadata = kv_connector_metadata
 
     def build_model_inputs(
         self, temperature: float = 1.0, top_p: float = 0.8, top_k: int = 1
@@ -143,9 +145,25 @@ class Scheduler:
         self.cache_manager = BlockManager(num_blocks=num_blocks, block_size=block_size)
         self.block_size = block_size
 
+        # PD
+        self.kv_connector = None
+
+    def set_kv_connector(self, kv_connector: "KVConnectorBase"):
+        self.kv_connector = kv_connector
+
     def add_request(self, request: InferenceRequest):
         if request is not None:
             request.status = RequestStatus.WAITING
+
+            if False:
+                if self.kv_connector is not None:
+                    kv_transfer_config = self.kv_connector.config.kv_transfer_config
+                    if kv_transfer_config.kv_role == "kv_producer":  # 是P节点
+                        request.kv_transfer_params = {
+                            "do_remote_decode": True,
+                            "do_remote_prefill": False,
+                            "transfer_id": f"xfer-{request.request_id}",
+                        }
             self.waiting_queue.sync_q.put(request)
 
     def schedule(self) -> Optional[SchedulerOutput]:
@@ -180,10 +198,30 @@ class Scheduler:
                 if not self.cache_manager.try_free_blocks(num_required_blocks):
                     raise RuntimeError("No available cache blocks for new request")
 
+            if False:
+                if self.kv_connector is not None:
+                    print(
+                        f"req.request_id: {req.request_id}, num_cached_tokens: {req.num_cached_tokens}"
+                    )
+                    num_new_local_computed_tokens = 0
+                    ext_tokens, load_kv_async = (
+                        self.kv_connector.get_num_new_matched_tokens(
+                            req, num_new_local_computed_tokens
+                        )
+                    )
+                    print(f"ext_tokens: {ext_tokens}, load_kv_async: {load_kv_async}")
+
             # Allocate blocks with automatic prefix caching support
             req.block_table, req.slot_mapping, req.num_cached_tokens = (
                 self.cache_manager.allocate_blocks(req_tokens, req.block_table)
             )
+
+            if False:
+                if self.kv_connector is not None:
+                    num_external_computed_tokens = 0
+                    self.kv_connector.update_state_after_alloc(
+                        req, "Block", num_external_computed_tokens
+                    )
 
             req.num_blocks = len(req.block_table)
             req.status = RequestStatus.RUNNING
@@ -191,10 +229,19 @@ class Scheduler:
 
         # Return prefill batch if any waiting requests were scheduled
         if scheduled_requests:
+            connector_metadata = None
+            if False:
+                if self.kv_connector is not None:
+                    connector_metadata = self.kv_connector.build_connector_meta(
+                        "scheduler_output"
+                    )
+                    print(f"connector_metadata: {connector_metadata}")
+
             is_prefill = True
             return SchedulerOutput(
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
+                kv_connector_metadata=connector_metadata,
             )
 
         # Process Running queue (decode phase)

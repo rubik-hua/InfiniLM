@@ -145,7 +145,7 @@ class Worker(WorkerBase):
     # Execution
     # ------------------------------------------------------------------
 
-    def execute_model(self, scheduler_output: Any) -> Optional[List[int]]:
+    def execute_model(self, scheduler_output) -> Optional["ModelRunnerOutput"]:
         """Execute model inference using the model runner.
 
         Args:

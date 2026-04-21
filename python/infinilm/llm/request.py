@@ -154,6 +154,40 @@ class InferenceRequest:
         self._stream_last_yielded_length: int = 0
         self._pending_token_offset: int = 0
 
+        # For PD
+        self.kv_transfer_params: Optional[dict] = None
+
+    def __str__(self) -> str:
+        attrs = [
+            f"request_id={self.request_id}",
+            f"prompt={self.prompt}",
+            f"prompt_token_ids={self.prompt_token_ids}",
+            f"prompt_length={self.prompt_length}",
+            f"arrival_time={self.arrival_time}",
+            f"finished_time={self.finished_time}",
+            f"sampling_params={self.sampling_params}",
+            f"eos_token_ids={self.eos_token_ids}",
+            f"generated_token_ids={self.generated_token_ids}",
+            f"generated_text={self.generated_text}",
+            f"is_prefill={self.is_prefill}",
+            f"status={self.status}",
+            f"finish_reason={self.finish_reason}",
+            f"priority={self.priority}",
+            f"cache_id={self.cache_id}",
+            f"block_table={self.block_table}",
+            f"slot_mapping={self.slot_mapping}",
+            f"num_cached_tokens={self.num_cached_tokens}",
+            f"num_blocks={self.num_blocks}",
+            f"request_data={self.request_data}",
+            f"http_request={self.http_request}",
+            f"_output_queue={self._output_queue}",
+            f"_aborted={self._aborted}",
+            f"_stream_last_yielded_length={self._stream_last_yielded_length}",
+            f"_pending_token_offset={self._pending_token_offset}",
+            f"kv_transfer_params={self.kv_transfer_params}",
+        ]
+        return "\nInferenceRequest(\n  " + ",\n  ".join(attrs) + "\n)"
+
     @property
     def output_queue(self) -> janus.Queue:
         """Lazy initialization of output queue."""

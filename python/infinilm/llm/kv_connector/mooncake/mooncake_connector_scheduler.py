@@ -6,6 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+from infinilm.llm.request import FinishReason
 
 
 # TODO:
@@ -194,7 +195,7 @@ class MooncakeConnectorScheduler:
 
         assert not self.is_kv_consumer
 
-        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+        if request.finish_reason != FinishReason.LENGTH:
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(params["transfer_id"])

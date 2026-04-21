@@ -23,7 +23,7 @@ curl -N -H "Content-Type: application/json" \
        "temperature": 1.0,
        "top_k": 50,
        "top_p": 0.8,
-       "max_tokens": 4,
+       "max_tokens": 1,
        "stream": false
      }'
 
