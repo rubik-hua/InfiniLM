@@ -135,7 +135,8 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         to_device(slot_mapping),
     };
 
-    infinilm::global_state::get_forward_context().attn_metadata = {
+    auto &meta = infinilm::global_state::get_forward_context().attn_metadata;
+    meta = {
         input.past_sequence_lengths,
         input.total_sequence_lengths,
         input.input_offsets,
@@ -143,6 +144,33 @@ InferEngine::Input::to_model_input(infinicore::Device device) const {
         input.block_tables,
         input.slot_mapping,
     };
+
+    // Capture `total_sequence_lengths` once, promoted to a CPU `int64` host
+    // copy. Lets the `MhaKvcache` backend skip its per-layer D2H sync
+    // (~137µs/call × 32 layers ≈ 4ms/step on our Llama decode path).
+    if (total_sequence_lengths.has_value()) {
+        auto cpu = total_sequence_lengths.value();
+        if (cpu->device().getType() != infinicore::Device::Type::CPU) {
+            cpu = cpu->to(infinicore::Device::cpu());
+        }
+        const auto n = cpu->numel();
+        meta.total_sequence_lengths_host.resize(n);
+        const auto *bytes = cpu->data();
+        if (cpu->dtype() == infinicore::DataType::I32) {
+            const auto *p = reinterpret_cast<const std::int32_t *>(bytes);
+            for (std::size_t i = 0; i < n; ++i) {
+                meta.total_sequence_lengths_host[i] =
+                    static_cast<std::int64_t>(p[i]);
+            }
+        } else if (cpu->dtype() == infinicore::DataType::I64) {
+            const auto *p = reinterpret_cast<const std::int64_t *>(bytes);
+            std::copy(p, p + n, meta.total_sequence_lengths_host.data());
+        } else {
+            meta.total_sequence_lengths_host.clear();
+        }
+    } else {
+        meta.total_sequence_lengths_host.clear();
+    }
     return input;
 }
 

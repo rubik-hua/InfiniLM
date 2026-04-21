@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include "../models/infinilm_model.hpp"
 
 namespace infinilm::global_state {
@@ -17,6 +20,10 @@ struct AttentionMetadata {
     std::optional<infinicore::Tensor> block_tables;
     /// Slot ids for each token `[seq]`. Used for paged cache.
     std::optional<infinicore::Tensor> slot_mapping;
+    /// CPU-side copy of `total_sequence_lengths` as `int64`, populated once per
+    /// forward step so backends can read per-sequence lengths without forcing a
+    /// D2H stream sync on every attention layer.
+    std::vector<std::int64_t> total_sequence_lengths_host;
 
     AttentionMetadata() = default;
 

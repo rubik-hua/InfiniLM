@@ -2,6 +2,8 @@
 
 #include "ops_shim_cuda.hpp"
 
+#include "../global_state/forward_context.hpp"
+
 #include <infinicore/context/context.hpp>
 
 #include <config.h>
@@ -304,6 +306,13 @@ infinicore::Tensor mha_kvcache(const infinicore::Tensor &q,
     auto ops_seqlens_k = to_ops_tensor(seqlens_k);
     auto ops_block_table = to_ops_tensor(block_table);
     auto ops_out = to_ops_tensor(out);
+
+    const auto &host_seqlens =
+        infinilm::global_state::get_forward_context()
+            .attn_metadata.total_sequence_lengths_host;
+    infini::ops::MhaKvcacheHostSeqlensHint hint{
+        host_seqlens.empty() ? nullptr : host_seqlens.data()};
+
     infini::ops::Operator<infini::ops::MhaKvcache>::Call(
         make_handle(), make_config(), ops_q, ops_k_cache, ops_v_cache,
         ops_seqlens_k, ops_block_table, scale, ops_out);
