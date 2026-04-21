@@ -4,6 +4,7 @@
 #include "minicpm5_moe_attention.hpp"
 #include "minicpm5_moe_dense_mlp.hpp"
 #include "minicpm5_moe_sparse_moe_block.hpp"
+#include "minicpm5_moe_vllm_fused_sparse_moe_block.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include <memory>
 

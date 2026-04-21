@@ -1,10 +1,10 @@
 #pragma once
 
-#include "../minicpm5_moe/minicpm5_moe_sparse_moe_block.hpp"
+#include "minicpm5_moe_sparse_moe_block.hpp"
 
 #include <optional>
 
-namespace infinilm::models::minicpm5_moe_fused_stub {
+namespace infinilm::models::minicpm5_moe {
 
 /**
  * MiniCPM5 MoE block that keeps HF-aligned CPU routing but runs routed experts via
@@ -12,7 +12,7 @@ namespace infinilm::models::minicpm5_moe_fused_stub {
  * Falls back to ``MiniCPM5MoeSparseMoeBlock::forward`` if dispatch fails or
  * ``INFINILM_DISABLE_VLLM_FUSED_MOE=1``.
  */
-class MiniCPM5MoeVllmFusedSparseMoeBlock : public infinilm::models::minicpm5_moe::MiniCPM5MoeSparseMoeBlock {
+class MiniCPM5MoeVllmFusedSparseMoeBlock : public MiniCPM5MoeSparseMoeBlock {
 public:
     using MiniCPM5MoeSparseMoeBlock::MiniCPM5MoeSparseMoeBlock;
 
@@ -27,4 +27,5 @@ private:
     mutable std::optional<infinicore::DataType> stacked_dt_;
 };
 
-} // namespace infinilm::models::minicpm5_moe_fused_stub
+} // namespace infinilm::models::minicpm5_moe
+

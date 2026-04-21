@@ -1,6 +1,6 @@
 # Flash-attn + vLLM fused MoE (clean guide)
 
-This guide is for running **MiniCPM5 MoE fused stub** with:
+This guide is for running **MiniCPM5 MoE** with:
 
 - **FlashAttention-2** (`--attn flash-attn` + paged KV)
 - **vLLM fused MoE** (preflight + fused experts path)
@@ -78,7 +78,7 @@ xmake build _infinilm && xmake install _infinilm
 
 ## Run (validated)
 
-### Fast validation (small stub already under `/tmp`)
+### Fast validation (original checkpoint directory)
 
 ```bash
 docker exec minicpm5-moe bash -lc '
@@ -91,16 +91,17 @@ TORCH_LIB=$(python -c "import torch, os; print(os.path.join(os.path.dirname(torc
 unset LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/root/.infini/lib:$TORCH_LIB:$REPO/.venv-vllm/lib/python3.12/site-packages:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
 cd "$REPO/InfiniLM/examples"
-python -u jiuge.py --nvidia --model-path /tmp/minicpm5_moe_fused_stub_jiuge \
+export INFINILM_FORCE_MOE_BACKEND=vllm_fused
+python -u jiuge.py --nvidia --model-path /data-aisoft/zenghua/models/minicpm5.16a3.v0314 \
   --prompt "Hi" --max-new-tokens 8 --top-k 1 \
   --attn flash-attn --enable-paged-attn --paged-kv-block-size 256
 '
 ```
 
-### Full “one-liner” (rebuild + full stub + flash-attn + fused MoE)
+### Full “one-liner” (rebuild + flash-attn + fused MoE)
 
 ```bash
-docker exec minicpm5-moe bash -lc 'set -euo pipefail; export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}; REPO=/home/zenghua/workspace/minicpm5-moe-support; MODEL=/data-aisoft/zenghua/models/minicpm5.16a3.v0314; STUB=/tmp/minicpm5_moe_fused_stub_jiuge_full; export XMAKE_ROOT=y; source "$REPO/.venv-vllm/bin/activate"; export PATH=$REPO/.venv-vllm/bin:$HOME/.local/bin:$PATH; export PYTHONPATH=$REPO/InfiniLM/python:$REPO/InfiniCore/python; cd $REPO/InfiniCore && python scripts/install.py --nv-gpu=y --cuda_arch=sm_80 --aten=y && xmake build _infinicore && xmake install _infinicore && cd $REPO/InfiniLM && xmake build _infinilm && xmake install _infinilm && TORCH_LIB=$(python -c "import torch,os; print(os.path.join(os.path.dirname(torch.__file__),\"lib\"))") && unset LD_LIBRARY_PATH && export LD_LIBRARY_PATH=/root/.infini/lib:$TORCH_LIB:$REPO/.venv-vllm/lib/python3.12/site-packages:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu && cd $REPO/InfiniLM/examples && python -u minicpm5_moe_fused_stub_ckpt.py --src "$MODEL" --out "$STUB" --mini-layers 0 && python -u jiuge.py --nvidia --model-path "$STUB" --prompt "Hi" --max-new-tokens 24 --top-k 1 --attn flash-attn --enable-paged-attn --paged-kv-block-size 256'
+docker exec minicpm5-moe bash -lc 'set -euo pipefail; export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}; REPO=/home/zenghua/workspace/minicpm5-moe-support; MODEL=/data-aisoft/zenghua/models/minicpm5.16a3.v0314; export XMAKE_ROOT=y; source "$REPO/.venv-vllm/bin/activate"; export PATH=$REPO/.venv-vllm/bin:$HOME/.local/bin:$PATH; export PYTHONPATH=$REPO/InfiniLM/python:$REPO/InfiniCore/python; cd $REPO/InfiniCore && python scripts/install.py --nv-gpu=y --cuda_arch=sm_80 --aten=y && xmake build _infinicore && xmake install _infinicore && cd $REPO/InfiniLM && xmake build _infinilm && xmake install _infinilm && python -c "import flash_attn" >/dev/null 2>&1 || pip install --no-build-isolation flash-attn && TORCH_LIB=$(python -c "import torch,os; print(os.path.join(os.path.dirname(torch.__file__),\"lib\"))") && unset LD_LIBRARY_PATH && export LD_LIBRARY_PATH=/root/.infini/lib:$TORCH_LIB:$REPO/.venv-vllm/lib/python3.12/site-packages:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu && cd $REPO/InfiniLM/examples && export INFINILM_FORCE_MOE_BACKEND=vllm_fused && unset INFINILM_DISABLE_VLLM_FUSED_MOE && python -u jiuge.py --nvidia --model-path "$MODEL" --prompt "Hi" --max-new-tokens 24 --top-k 1 --attn flash-attn --enable-paged-attn --paged-kv-block-size 256'
 ```
 
 Expected log:

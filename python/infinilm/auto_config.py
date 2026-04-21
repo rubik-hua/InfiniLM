@@ -37,7 +37,6 @@ class AutoConfig:
             "qwen3_vl",
             "qwen3_moe",
             "minicpm5_moe",
-            "minicpm5_moe_fused_stub",
         ]:
             return LlamaConfig(**config_dict)
 

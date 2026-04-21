@@ -211,67 +211,24 @@ If your system `python3` differs (e.g. after a global `pip install vllm`), recre
 
 ---
 
-## InfiniLM: MiniCPM5 fused-stub speed (fused vs reference MoE)
+## InfiniLM: MiniCPM5 MoE speed (fused vs reference MoE)
 
-This compares **two MoE execution paths inside InfiniLM** for the **same** full-depth fused-stub checkpoint:
+This compares **two MoE execution paths inside InfiniLM** for the **same** MiniCPM5-MoE checkpoint:
 
 - **Fused**: `MiniCPM5MoeVllmFusedSparseMoeBlock` dispatches into `infinicore.vllm_fused_moe_bridge.fused_experts_ic` (vLLM `fused_experts`)
 - **Reference**: set `INFINILM_DISABLE_VLLM_FUSED_MOE=1` to force the per-expert C++ loop (`MiniCPM5MoeSparseMoeBlock`)
 
-### Environment (2026-04-20, minicpm5-moe container)
+### Flash-attn + paged KV, longer prompt (2026-04-21)
 
-- **GPU**: A100-SXM4-80GB
-- **CUDA_VISIBLE_DEVICES**: `2`
-- **Attention**: `default` (static KV cache)
-- **Workload**: prompt `Hi`, batch=1, `max_new_tokens=16`, greedy (`top_k=1, top_p=1, temp=1`)
-- **Checkpoint**: `/data-aisoft/zenghua/models/minicpm5.16a3.v0314`
-- **Fused-stub dir**: `/tmp/minicpm5_moe_fused_stub_jiuge_full` (built with `minicpm5_moe_fused_stub_ckpt.py --mini-layers 0`)
-
-### Commands
-
-```bash
-REPO=/home/zenghua/workspace/minicpm5-moe-support
-MODEL=/data-aisoft/zenghua/models/minicpm5.16a3.v0314
-STUB=/tmp/minicpm5_moe_fused_stub_jiuge_full
-export PYTHONPATH=$REPO/InfiniLM/python:$REPO/InfiniCore/python:${PYTHONPATH:-}
-TORCH_LIB=$(python3 -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')
-export LD_LIBRARY_PATH=/root/.infini/lib:$TORCH_LIB:/usr/local/lib/python3.12/dist-packages:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
-export CUDA_VISIBLE_DEVICES=2
-
-# Build full-depth fused-stub
-python3 -u $REPO/InfiniLM/examples/minicpm5_moe_fused_stub_ckpt.py --src "$MODEL" --out "$STUB" --mini-layers 0
-
-# Fused path (default; ensure disable flag is not set)
-unset INFINILM_DISABLE_VLLM_FUSED_MOE
-python3 -u $REPO/InfiniLM/examples/jiuge.py --nvidia --model-path "$STUB" --prompt Hi --max-new-tokens 16 --attn default
-
-# Reference path
-export INFINILM_DISABLE_VLLM_FUSED_MOE=1
-python3 -u $REPO/InfiniLM/examples/jiuge.py --nvidia --model-path "$STUB" --prompt Hi --max-new-tokens 16 --attn default
-```
-
-### Results (jiuge.py printout)
-
-| Path | Weight load (ms) | Total gen (ms) | TTFT (ms) | Prefill tok/s | Decode avg ITL (ms) | Decode tok/s |
-|------|------------------:|---------------:|----------:|--------------:|---------------------:|-------------:|
-| **Fused** | 107332.88 | 1718.53 | 767.41 | 13.03 | 63.41 | 15.77 |
-| **Reference** (`INFINILM_DISABLE_VLLM_FUSED_MOE=1`) | 105755.48 | 1438.60 | 643.16 | 15.55 | 53.03 | 18.86 |
-
-**Notes:**
-- These numbers include more than MoE alone (full model forward + sampling + D2H). For a MoE-only microbench, use the fused-vs-ref logit comparison script with additional timing.
-- If GPU memory is tight, run on a mostly-free A100 (avoid GPU0 in this container; it is often occupied).
-
-### Longer prompt + larger max_new_tokens (2026-04-20)
-
-- **Prompt tokens**: 39 (as reported by `jiuge.py`)
+- **Prompt tokens**: 65 (as reported by `jiuge.py`)
 - **max_new_tokens**: 128
-- **CUDA_VISIBLE_DEVICES**: `2`
-- **Attention**: `default`
+- **CUDA_VISIBLE_DEVICES**: `1`
+- **Attention**: `flash-attn` + `--enable-paged-attn` (paged KV)
 
 | Path | Weight load (ms) | Total gen (ms) | TTFT (ms) | Prefill tok/s | Decode avg ITL (ms) | Decode tok/s |
 |------|------------------:|---------------:|----------:|--------------:|---------------------:|-------------:|
-| **Fused** | 141044.27 | 10163.77 | 1991.06 | 19.59 | 64.35 | 15.54 |
-| **Reference** (`INFINILM_DISABLE_VLLM_FUSED_MOE=1`) | 106471.44 | 8518.72 | 1816.64 | 21.47 | 52.77 | 18.95 |
+| **Fused** (`INFINILM_FORCE_MOE_BACKEND=vllm_fused`) | 108722.62 | 4237.83 | 466.51 | 139.33 | 29.7 | 33.68 |
+| **Reference** (`INFINILM_FORCE_MOE_BACKEND=baseline`) | 106274.83 | 9388.55 | 2835.14 | 22.93 | 51.6 | 19.38 |
 
 ### vLLM (`vllm_bench_match_jiuge.py`) — aligned definitions
 

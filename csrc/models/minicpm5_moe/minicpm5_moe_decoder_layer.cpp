@@ -2,6 +2,9 @@
 
 #include "infinicore/ops.hpp"
 
+#include <cstdlib>
+#include <string>
+
 namespace infinilm::models::minicpm5_moe {
 
 MiniCPM5MoeDecoderLayer::MiniCPM5MoeDecoderLayer(std::shared_ptr<infinilm::config::ModelConfig> model_config,
@@ -22,7 +25,19 @@ MiniCPM5MoeDecoderLayer::MiniCPM5MoeDecoderLayer(std::shared_ptr<infinilm::confi
     if (layer_idx < first_k_dense_replace) {
         dense_mlp_ = this->register_module<MiniCPM5DenseMLP>("mlp", model_config, device);
     } else {
-        moe_mlp_ = this->register_module<MiniCPM5MoeSparseMoeBlock>("mlp", model_config, device);
+        // Default to a fused-capable MoE block that auto-falls back to the reference implementation
+        // when vLLM fused experts are not usable in the current Python stack.
+        //
+        // Overrides:
+        // - INFINILM_FORCE_MOE_BACKEND=baseline  -> always reference (per-expert) path
+        // - INFINILM_FORCE_MOE_BACKEND=vllm_fused|auto (default) -> fused-capable block
+        const char *force_backend = std::getenv("INFINILM_FORCE_MOE_BACKEND");
+        const bool force_baseline = force_backend && std::string(force_backend) == "baseline";
+        if (force_baseline) {
+            moe_mlp_ = this->register_module<MiniCPM5MoeSparseMoeBlock>("mlp", model_config, device);
+        } else {
+            moe_mlp_ = this->register_module<MiniCPM5MoeVllmFusedSparseMoeBlock>("mlp", model_config, device);
+        }
     }
 }
 
