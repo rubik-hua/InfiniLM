@@ -206,6 +206,15 @@ def test(
     # ---------------------------------------------------------------------------- #
     load_model_state_dict_by_file(model, model_path, dtype=model.config.dtype)
 
+    # MoE + vLLM fused path: resolve config JSON and JIT fused_experts before TTFT timer.
+    if infini_device.type == "cuda":
+        try:
+            from infinicore.vllm_fused_moe_bridge import preflight_vllm_fused_moe_for_ttft
+
+            preflight_vllm_fused_moe_for_ttft(model_path, device_index=infini_device.index)
+        except Exception as e:
+            print(f"[jiuge] vLLM fused MoE preflight skipped: {e}", flush=True)
+
     # ---------------------------------------------------------------------------- #
     #                        create tokenizer
     # ---------------------------------------------------------------------------- #

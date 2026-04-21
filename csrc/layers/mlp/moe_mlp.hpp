@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
+#include "../linear/fused_linear.hpp"
 #include "../linear/linear.hpp"
 #include "infinicore/nn/module.hpp"
 
@@ -21,6 +22,13 @@ public:
 
     size_t hidden_size() const { return hidden_size_; }
     size_t moe_intermediate_size() const { return moe_intermediate_size_; }
+
+    const std::shared_ptr<infinilm::layers::linear::GateUpParallelLinear> &gate_up_linear() const {
+        return gate_up_proj_;
+    }
+    const std::shared_ptr<infinilm::layers::linear::RowParallelLinear> &down_linear() const {
+        return down_proj_;
+    }
 
 protected:
     INFINICORE_NN_MODULE(infinilm::layers::linear::GateUpParallelLinear, gate_up_proj);

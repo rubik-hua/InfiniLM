@@ -1,3 +1,4 @@
+import ctypes
 import argparse
 import os
 import json
@@ -6,33 +7,21 @@ import tempfile
 
 import numpy as np
 
-_LOGIT_LINKER_REEXEC = "LOGIT_SANITY_LINKER_REEXEC"
 
-
-def _ensure_linker_env():
-    """Re-exec once so LD_LIBRARY_PATH / LD_PRELOAD apply at process start (required for dlopen)."""
-    if os.environ.get(_LOGIT_LINKER_REEXEC) == "1":
+def _maybe_load_flash_attn_global() -> None:
+    """Match jiuge.py: satisfy InfiniCore flash-attn symbol resolution without HPCX LD_PRELOAD ordering."""
+    if os.environ.get("INFINILM_DISABLE_FLASH_ATTN_RTLD_GLOBAL") == "1":
         return
-    torch_lib = "/usr/local/lib/python3.12/dist-packages/torch/lib"
     fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    env = os.environ.copy()
-    env.pop("LD_LIBRARY_PATH", None)
-    env["LD_LIBRARY_PATH"] = ":".join(
-        [
-            "/opt/hpcx/ompi/lib",
-            "/opt/hpcx/ucx/lib",
-            "/opt/hpcx/ucc/lib",
-            "/root/.infini/lib",
-            torch_lib,
-            "/usr/local/lib/python3.12/dist-packages",
-            "/usr/local/cuda/lib64",
-            "/usr/lib/x86_64-linux-gnu",
-            "/lib/x86_64-linux-gnu",
-        ]
-    )
-    env["LD_PRELOAD"] = fa
-    env[_LOGIT_LINKER_REEXEC] = "1"
-    os.execve(sys.executable, [sys.executable] + sys.argv, env)
+    if os.path.isfile(fa):
+        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
+
+
+_maybe_load_flash_attn_global()
+
+import infinicore  # before torch/transformers (same order as jiuge.py; avoids brittle pybind/Torch init)
+
+_EX_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def topk(x: np.ndarray, k: int):
@@ -42,19 +31,30 @@ def topk(x: np.ndarray, k: int):
 
 
 def main():
-    _ensure_linker_env()
+    # RankWorker only copies last-token logits when this is set (see rank_worker.cpp).
+    os.environ.setdefault("INFINILM_RETURN_LAST_LOGITS", "1")
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True)
     ap.add_argument("--prompt", default="Hi")
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--mini-layers", type=int, default=1)
+    ap.add_argument("--tp", type=int, default=1, help="Tensor parallel size for InfiniLM engine.")
+    ap.add_argument(
+        "--fused-stub",
+        action="store_true",
+        help="Use minicpm5_moe_fused_stub (InfiniLM-only; no HF baseline).",
+    )
+    ap.add_argument(
+        "--compare-fused",
+        action="store_true",
+        help="(fused-stub only) Run once with vLLM fused MoE enabled, once with it disabled, and compare logits.",
+    )
     args = ap.parse_args()
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    import infinicore
     from infinilm.distributed import DistConfig
     from infinilm.infer_engine import InferEngine
     from infinilm.cache import StaticKVCacheConfig
@@ -62,50 +62,67 @@ def main():
 
     model_path = os.path.expanduser(args.model_path)
 
-    # Create a temporary \"mini\" checkpoint with fewer layers to isolate layer-0 correctness.
-    # This keeps both HF and InfiniLM constructing the same depth.
-    if args.mini_layers is not None and args.mini_layers > 0:
-        full_cfg = json.load(open(os.path.join(model_path, "config.json")))
-        full_layers = int(full_cfg.get("num_hidden_layers", 0))
-        # If requested layers equals the original, skip mini-checkpoint creation.
-        if int(args.mini_layers) == full_layers:
-            args.mini_layers = 0
+    if args.fused_stub:
+        sys.path.insert(0, _EX_DIR)
+        from minicpm5_moe_fused_stub_ckpt import prepare_minicpm5_moe_fused_stub_directory
 
-    if args.mini_layers is not None and args.mini_layers > 0:
-        tmpdir = tempfile.mkdtemp(prefix="minicpm5_moe_mini_")
-        mini_path = os.path.join(tmpdir, "ckpt")
-        os.makedirs(mini_path, exist_ok=True)
-
-        # Copy/symlink tokenizer assets.
-        for fn in [
-            "tokenizer.json",
-            "tokenizer.model",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "chat_template.jinja",
-            "configuration_minicpm.py",
-            "modeling_minicpm.py",
-        ]:
-            src = os.path.join(model_path, fn)
-            dst = os.path.join(mini_path, fn)
-            if os.path.exists(src) and not os.path.exists(dst):
-                os.symlink(src, dst)
-
-        cfg = json.load(open(os.path.join(model_path, "config.json")))
-        cfg["num_hidden_layers"] = int(args.mini_layers)
-        json.dump(cfg, open(os.path.join(mini_path, "config.json"), "w"), indent=2)
-
-        # Filter weights to layer0 + embeddings + norm + lm_head.
-        full_sd = torch.load(os.path.join(model_path, "pytorch_model.bin"), weights_only=True, map_location="cpu")
-        keep_prefixes = (
-            "model.embed_tokens.",
-            "model.layers.0.",
-            "model.norm.",
-            "lm_head.",
+        tmpdir = tempfile.mkdtemp(prefix="minicpm5_moe_fused_stub_")
+        stub_path = os.path.join(tmpdir, "ckpt")
+        prepare_minicpm5_moe_fused_stub_directory(
+            model_path,
+            stub_path,
+            mini_layers=int(args.mini_layers) if args.mini_layers else 0,
         )
-        mini_sd = {k: v for k, v in full_sd.items() if k.startswith(keep_prefixes)}
-        torch.save(mini_sd, os.path.join(mini_path, "pytorch_model.bin"))
-        model_path = mini_path
+        model_path = stub_path
+    else:
+        # Create a temporary "mini" checkpoint with fewer layers to isolate layer-0 correctness.
+        # This keeps both HF and InfiniLM constructing the same depth.
+        if args.mini_layers is not None and args.mini_layers > 0:
+            full_cfg = json.load(open(os.path.join(model_path, "config.json")))
+            full_layers = int(full_cfg.get("num_hidden_layers", 0))
+            # If requested layers equals the original, skip mini-checkpoint creation.
+            if int(args.mini_layers) == full_layers:
+                args.mini_layers = 0
+
+        if args.mini_layers is not None and args.mini_layers > 0:
+            tmpdir = tempfile.mkdtemp(prefix="minicpm5_moe_mini_")
+            mini_path = os.path.join(tmpdir, "ckpt")
+            os.makedirs(mini_path, exist_ok=True)
+
+            # Copy/symlink tokenizer assets.
+            for fn in [
+                "tokenizer.json",
+                "tokenizer.model",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "chat_template.jinja",
+                "configuration_minicpm.py",
+                "modeling_minicpm.py",
+            ]:
+                src = os.path.join(model_path, fn)
+                dst = os.path.join(mini_path, fn)
+                if os.path.exists(src) and not os.path.exists(dst):
+                    os.symlink(src, dst)
+
+            cfg = json.load(open(os.path.join(model_path, "config.json")))
+            cfg["num_hidden_layers"] = int(args.mini_layers)
+            json.dump(cfg, open(os.path.join(mini_path, "config.json"), "w"), indent=2)
+
+            # Filter weights to layer0 + embeddings + norm + lm_head.
+            full_sd = torch.load(
+                os.path.join(model_path, "pytorch_model.bin"),
+                weights_only=True,
+                map_location="cpu",
+            )
+            keep_prefixes = (
+                "model.embed_tokens.",
+                "model.layers.0.",
+                "model.norm.",
+                "lm_head.",
+            )
+            mini_sd = {k: v for k, v in full_sd.items() if k.startswith(keep_prefixes)}
+            torch.save(mini_sd, os.path.join(mini_path, "pytorch_model.bin"))
+            model_path = mini_path
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     text = tok.apply_chat_template(
@@ -116,22 +133,24 @@ def main():
     enc = tok(text, return_tensors="pt")
     input_ids_pt = enc["input_ids"]
 
-    hf = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    ).to("cuda").eval()
+    if not args.fused_stub:
+        hf = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        ).to("cuda").eval()
 
-    with torch.no_grad():
-        out = hf(input_ids=input_ids_pt.to("cuda"))
-        hf_logits = out.logits[0, -1].float().cpu().numpy()
+        with torch.no_grad():
+            out = hf(input_ids=input_ids_pt.to("cuda"))
+            hf_logits = out.logits[0, -1].float().cpu().numpy()
 
     device = infinicore.device("cuda", 0)
+    dist = DistConfig(int(args.tp))
     eng = InferEngine(
         model_path,
         device=device,
-        distributed_config=DistConfig(1),
+        distributed_config=dist,
         attention_backend="default",
     )
     load_model_state_dict_by_file(eng, model_path, dtype=eng.config.dtype)
@@ -152,29 +171,57 @@ def main():
     # returns only output_ids).
     from infinilm.lib import _infinilm
 
-    out = _infinilm.InferEngine.forward(
-        eng,
-        _infinilm.InferEngine.Input(
-            input_ids_inf._underlying,
-            position_ids=pos._underlying,
-            past_sequence_lengths=past._underlying,
-            total_sequence_lengths=total._underlying,
-            input_offsets=offsets._underlying,
-            cu_seqlens=cu._underlying,
-            temperature=1.0,
-            top_k=1,
-            top_p=1.0,
-        ),
-    )
-    inf_logits = infinicore.Tensor(out.logits).to_numpy().astype(np.float32)
+    def _run_infinilm_forward() -> np.ndarray:
+        out = _infinilm.InferEngine.forward(
+            eng,
+            _infinilm.InferEngine.Input(
+                input_ids_inf._underlying,
+                position_ids=pos._underlying,
+                past_sequence_lengths=past._underlying,
+                total_sequence_lengths=total._underlying,
+                input_offsets=offsets._underlying,
+                cu_seqlens=cu._underlying,
+                temperature=1.0,
+                top_k=1,
+                top_p=1.0,
+            ),
+        )
+        return infinicore.Tensor(out.logits).to_numpy().astype(np.float32)
 
-    # Metrics
+    inf_logits = _run_infinilm_forward()
+
+    print("== Logit sanity (last position) ==")
+    if args.fused_stub:
+        assert np.all(np.isfinite(inf_logits)), "non-finite logits from fused_stub forward"
+        print(f"fused_stub: logits norm={float(np.linalg.norm(inf_logits)):.4f} (InfiniLM only)")
+
+        if args.compare_fused:
+            # Compare vLLM fused experts path vs reference per-expert loop.
+            os.environ.pop("INFINILM_DISABLE_VLLM_FUSED_MOE", None)
+            fused_logits = _run_infinilm_forward()
+            os.environ["INFINILM_DISABLE_VLLM_FUSED_MOE"] = "1"
+            ref_logits = _run_infinilm_forward()
+
+            fused_norm = np.linalg.norm(fused_logits) + 1e-12
+            ref_norm = np.linalg.norm(ref_logits) + 1e-12
+            cos = float(np.dot(fused_logits, ref_logits) / (fused_norm * ref_norm))
+            max_abs = float(np.max(np.abs(fused_logits - ref_logits)))
+            print(f"fused_vs_ref cosine:  {cos:.6f}")
+            print(f"fused_vs_ref max_abs: {max_abs:.6f}")
+
+        k = args.topk
+        inf_i, inf_v = topk(inf_logits, k)
+        print(f"\n-- InfiniLM top{k} --")
+        for i, v in zip(inf_i, inf_v):
+            print(int(i), float(v), tok.decode([int(i)]))
+        return
+
+    # Metrics vs HF
     hf_norm = np.linalg.norm(hf_logits) + 1e-12
     inf_norm = np.linalg.norm(inf_logits) + 1e-12
     cos = float(np.dot(hf_logits, inf_logits) / (hf_norm * inf_norm))
     max_abs = float(np.max(np.abs(hf_logits - inf_logits)))
 
-    print("== Logit sanity (last position) ==")
     print(f"cosine:   {cos:.6f}")
     print(f"max_abs:  {max_abs:.6f}")
 

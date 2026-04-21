@@ -1,5 +1,6 @@
 #include "../../engine/infer_engine.hpp"
 #include "infinicore/tensor.hpp"
+#include <pybind11/gil.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -52,9 +53,15 @@ inline void bind_infer_engine(py::module &m) {
              py::arg("cache_config") = py::none(),
              py::arg("enable_graph_compiling") = false,
              py::arg("attention_backend") = "default")
-        .def("load_param", &InferEngine::load_param,
-             py::arg("name"), py::arg("param"),
-             "Load a parameter tensor into all workers (each worker picks its shard)")
+        .def(
+            "load_param",
+            [](InferEngine &self, const std::string &name, const infinicore::Tensor &param) {
+                self.load_param(name, param);
+            },
+            py::call_guard<py::gil_scoped_release>(),
+            py::arg("name"),
+            py::arg("param"),
+            "Load a parameter tensor into all workers (each worker picks its shard)")
         .def("state_dict", [](InferEngine &self) {
             py::list state_dict_tp_all;
             for (const auto &state_dict_tp : self.state_dict()) {
@@ -67,9 +74,15 @@ inline void bind_infer_engine(py::module &m) {
             return state_dict_tp_all;
         })
         .def(
-            "forward", [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output { return self.forward(input); }, "Run inference on all ranks with arbitrary arguments")
+            "forward",
+            [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output { return self.forward(input); },
+            py::call_guard<py::gil_scoped_release>(),
+            "Run inference on all ranks with arbitrary arguments")
         .def(
-            "reset_cache", [](InferEngine &self, std::shared_ptr<cache::CacheConfig> cfg) { self.reset_cache(cfg ? cfg.get() : nullptr); }, py::arg("cache_config") = py::none())
+            "reset_cache",
+            [](InferEngine &self, std::shared_ptr<cache::CacheConfig> cfg) { self.reset_cache(cfg ? cfg.get() : nullptr); },
+            py::call_guard<py::gil_scoped_release>(),
+            py::arg("cache_config") = py::none())
         .def("get_cache_config", [](const InferEngine &self) -> std::shared_ptr<cache::CacheConfig> {
             auto cfg = self.get_cache_config();
             return cfg ? std::shared_ptr<cache::CacheConfig>(cfg->unique_copy()) : nullptr; })
@@ -100,9 +113,15 @@ inline void bind_infer_engine(py::module &m) {
              py::arg("enable_graph_compiling") = false,
              py::arg("attention_backend") = "default",
              py::arg("kv_cache_dtype") = py::none())
-        .def("load_param", &InferEngine::load_param,
-             py::arg("name"), py::arg("param"),
-             "Load a parameter tensor into all workers (each worker picks its shard)")
+        .def(
+            "load_param",
+            [](InferEngine &self, const std::string &name, const infinicore::Tensor &param) {
+                self.load_param(name, param);
+            },
+            py::call_guard<py::gil_scoped_release>(),
+            py::arg("name"),
+            py::arg("param"),
+            "Load a parameter tensor into all workers (each worker picks its shard)")
         .def("state_dict", [](InferEngine &self) {
             py::list state_dict_tp_all;
             for (const auto &state_dict_tp : self.state_dict()) {
@@ -115,9 +134,15 @@ inline void bind_infer_engine(py::module &m) {
             return state_dict_tp_all;
         })
         .def(
-            "forward", [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output { return self.forward(input); }, "Run inference on all ranks with arbitrary arguments")
+            "forward",
+            [](InferEngine &self, const InferEngine::Input &input) -> InferEngine::Output { return self.forward(input); },
+            py::call_guard<py::gil_scoped_release>(),
+            "Run inference on all ranks with arbitrary arguments")
         .def(
-            "reset_cache", [](InferEngine &self, std::shared_ptr<cache::CacheConfig> cfg) { self.reset_cache(cfg ? cfg.get() : nullptr); }, py::arg("cache_config") = py::none())
+            "reset_cache",
+            [](InferEngine &self, std::shared_ptr<cache::CacheConfig> cfg) { self.reset_cache(cfg ? cfg.get() : nullptr); },
+            py::call_guard<py::gil_scoped_release>(),
+            py::arg("cache_config") = py::none())
         .def("get_cache_config", [](const InferEngine &self) {
             auto cfg = self.get_cache_config();
             return std::shared_ptr<cache::CacheConfig>(std::move(cfg->unique_copy())); })
