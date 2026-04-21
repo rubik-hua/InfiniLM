@@ -49,9 +49,112 @@
 #include <cuda/nvidia/device_.h>
 #endif
 
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace infinilm::ops_shim {
+
+// Lightweight aggregate timing controlled by the `INFINILM_OPS_PROFILE` env
+// var. When set, every shim entry point accumulates `(count, ns)` into a
+// small per-op atomic counter and dumps the totals at program exit. Disabled
+// by default (single static check per call is negligible).
+namespace profile {
+
+enum OpId : std::size_t {
+    kAdd = 0,
+    kSwiglu,
+    kPagedCaching,
+    kMhaKvcache,
+    kMhaVarlen,
+    kRandomSample,
+    kEmbedding,
+    kLinear,
+    kRmsNorm,
+    kRmsNormForwardInplace,
+    kRopeForward,
+    kCount,
+};
+
+inline constexpr std::array<const char *, kCount> kOpNames{
+    "add",        "swiglu",      "paged_caching_",     "mha_kvcache",
+    "mha_varlen", "random_sample_", "embedding",       "linear",
+    "rms_norm",   "rms_norm_forward_inplace",          "rope_forward",
+};
+
+struct Counter {
+    std::atomic<std::uint64_t> count{0};
+    std::atomic<std::uint64_t> total_ns{0};
+};
+
+inline std::array<Counter, kCount> &counters() {
+    static std::array<Counter, kCount> instance;
+    return instance;
+}
+
+inline bool enabled() {
+    static const bool value = [] {
+        const char *env = std::getenv("INFINILM_OPS_PROFILE");
+        const bool on = env != nullptr && env[0] != '\0' && env[0] != '0';
+        if (on) {
+            std::atexit([] {
+                std::fprintf(stderr,
+                             "\n=== `infinilm::ops_shim` profile ===\n");
+                std::fprintf(stderr, "%-28s %12s %12s %12s\n", "op", "count",
+                             "total_ms", "avg_us");
+                std::uint64_t total_ns = 0;
+                for (std::size_t i = 0; i < kCount; ++i) {
+                    auto count = counters()[i].count.load();
+                    auto ns = counters()[i].total_ns.load();
+                    total_ns += ns;
+                    if (count == 0) {
+                        continue;
+                    }
+                    std::fprintf(stderr, "%-28s %12llu %12.3f %12.3f\n",
+                                 kOpNames[i],
+                                 static_cast<unsigned long long>(count),
+                                 ns / 1e6, ns / static_cast<double>(count) / 1e3);
+                }
+                std::fprintf(stderr, "%-28s %12s %12.3f\n", "TOTAL", "",
+                             total_ns / 1e6);
+            });
+        }
+        return on;
+    }();
+    return value;
+}
+
+class Scope {
+ public:
+    explicit Scope(OpId op) : op_{op}, start_{} {
+        if (enabled()) {
+            start_ = std::chrono::steady_clock::now();
+        }
+    }
+
+    ~Scope() {
+        if (enabled()) {
+            auto end = std::chrono::steady_clock::now();
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          end - start_)
+                          .count();
+            counters()[op_].count.fetch_add(1, std::memory_order_relaxed);
+            counters()[op_].total_ns.fetch_add(ns, std::memory_order_relaxed);
+        }
+    }
+
+ private:
+    OpId op_;
+    std::chrono::steady_clock::time_point start_;
+};
+
+}  // namespace profile
+
+#define INFINILM_OPS_SHIM_PROFILE(op_id) profile::Scope _profile_scope_{profile::OpId::op_id}
+
 
 namespace {
 
@@ -162,6 +265,7 @@ infini::ops::Config make_config(std::size_t implementation_index = kFallbackTorc
 } // namespace
 
 infinicore::Tensor add(const infinicore::Tensor &a, const infinicore::Tensor &b) {
+    INFINILM_OPS_SHIM_PROFILE(kAdd);
     auto c = infinicore::Tensor::empty(a->shape(), a->dtype(), a->device());
     cuda_dispatch::add(to_ops_tensor(a), to_ops_tensor(b), to_ops_tensor(c),
                        infinicore::context::getStream());
@@ -169,6 +273,7 @@ infinicore::Tensor add(const infinicore::Tensor &a, const infinicore::Tensor &b)
 }
 
 infinicore::Tensor swiglu(const infinicore::Tensor &input, const infinicore::Tensor &gate) {
+    INFINILM_OPS_SHIM_PROFILE(kSwiglu);
     auto out = infinicore::Tensor::empty(input->shape(), input->dtype(), input->device());
     cuda_dispatch::swiglu(to_ops_tensor(input), to_ops_tensor(gate),
                           to_ops_tensor(out), infinicore::context::getStream());
@@ -178,6 +283,7 @@ infinicore::Tensor swiglu(const infinicore::Tensor &input, const infinicore::Ten
 void paged_caching_(infinicore::Tensor k_cache, infinicore::Tensor v_cache,
                     const infinicore::Tensor &k, const infinicore::Tensor &v,
                     const infinicore::Tensor &slot_mapping) {
+    INFINILM_OPS_SHIM_PROFILE(kPagedCaching);
     auto ops_k_cache = to_ops_tensor(k_cache);
     auto ops_v_cache = to_ops_tensor(v_cache);
     auto ops_k = to_ops_tensor(k);
@@ -194,6 +300,7 @@ infinicore::Tensor mha_kvcache(const infinicore::Tensor &q,
                                const infinicore::Tensor &seqlens_k,
                                const infinicore::Tensor &block_table,
                                float scale) {
+    INFINILM_OPS_SHIM_PROFILE(kMhaKvcache);
     auto out = infinicore::Tensor::empty(q->shape(), q->dtype(), q->device());
     auto ops_q = to_ops_tensor(q);
     auto ops_k_cache = to_ops_tensor(k_cache);
@@ -215,6 +322,7 @@ void mha_varlen_(infinicore::Tensor out,
                  const infinicore::Tensor &cum_seqlens_k,
                  const infinicore::Tensor &block_table,
                  float scale) {
+    INFINILM_OPS_SHIM_PROFILE(kMhaVarlen);
     auto ops_q = to_ops_tensor(q);
     auto ops_k_cache = to_ops_tensor(k_cache);
     auto ops_v_cache = to_ops_tensor(v_cache);
@@ -230,6 +338,7 @@ void mha_varlen_(infinicore::Tensor out,
 void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
                     float random_val, float topp, int topk,
                     float temperature) {
+    INFINILM_OPS_SHIM_PROFILE(kRandomSample);
     auto ops_logits = to_ops_tensor(logits);
     auto ops_out = to_ops_tensor(out);
     infini::ops::Operator<infini::ops::RandomSample>::Call(
@@ -239,6 +348,7 @@ void random_sample_(infinicore::Tensor out, const infinicore::Tensor &logits,
 
 infinicore::Tensor embedding(const infinicore::Tensor &indices,
                              const infinicore::Tensor &weight) {
+    INFINILM_OPS_SHIM_PROFILE(kEmbedding);
     // Output shape: `indices.shape() + [embedding_dim]`.
     auto out_shape = indices->shape();
     out_shape.push_back(weight->shape().back());
@@ -255,6 +365,7 @@ infinicore::Tensor embedding(const infinicore::Tensor &indices,
 infinicore::Tensor linear(const infinicore::Tensor &input,
                           const infinicore::Tensor &weight,
                           const std::optional<infinicore::Tensor> &bias) {
+    INFINILM_OPS_SHIM_PROFILE(kLinear);
     const auto &input_shape = input->shape();
     const auto &weight_shape = weight->shape();
     const auto out_features = weight_shape[0];
@@ -301,6 +412,7 @@ infinicore::Tensor linear(const infinicore::Tensor &input,
 
 infinicore::Tensor rms_norm(const infinicore::Tensor &input,
                             const infinicore::Tensor &weight, float eps) {
+    INFINILM_OPS_SHIM_PROFILE(kRmsNorm);
     auto out = infinicore::Tensor::empty(input->shape(), input->dtype(), input->device());
     cuda_dispatch::rms_norm(to_ops_tensor(input), to_ops_tensor(weight), eps,
                             to_ops_tensor(out),
@@ -311,6 +423,7 @@ infinicore::Tensor rms_norm(const infinicore::Tensor &input,
 void rms_norm_forward_inplace(infinicore::Tensor &hidden_states,
                               infinicore::Tensor &residual,
                               const infinicore::Tensor &weight, float eps) {
+    INFINILM_OPS_SHIM_PROFILE(kRmsNormForwardInplace);
     if (!residual) {
         // First layer: `residual` captures the pre-norm activations; we only
         // normalize `hidden_states`.
@@ -339,6 +452,7 @@ infinicore::Tensor rope_forward(const infinicore::nn::RoPE &module,
                                 const infinicore::Tensor &x,
                                 const infinicore::Tensor &positions,
                                 std::optional<infinicore::Tensor> out) {
+    INFINILM_OPS_SHIM_PROFILE(kRopeForward);
     const bool is_neox_style =
         module.algo() == infinicore::nn::RoPE::Algo::GPT_NEOX;
     auto destination = out.value_or(x);
