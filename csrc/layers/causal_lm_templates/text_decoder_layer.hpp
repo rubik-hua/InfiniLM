@@ -1,10 +1,10 @@
 #pragma once
 
 #include "../../config/model_config.hpp"
+#include "../../ops_shim/ops_shim.hpp"
 #include "infinicore/device.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
-#include "infinicore/ops.hpp"
 #include "infinicore/tensor.hpp"
 #include <memory>
 #include <tuple>
@@ -50,12 +50,12 @@ public:
         auto residual = hidden_states;
         hidden_states = input_layernorm_->forward(hidden_states);
         hidden_states = self_attn_->forward(positions, hidden_states);
-        hidden_states = infinicore::op::add(residual, hidden_states);
+        hidden_states = infinilm::ops_shim::add(residual, hidden_states);
 
         residual = hidden_states;
         hidden_states = post_attention_layernorm_->forward(hidden_states);
         hidden_states = mlp_->forward(hidden_states);
-        hidden_states = infinicore::op::add(residual, hidden_states);
+        hidden_states = infinilm::ops_shim::add(residual, hidden_states);
         return hidden_states;
     }
 
