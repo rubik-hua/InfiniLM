@@ -2,6 +2,16 @@ add_requires("pybind11")
 
 local INFINI_ROOT = os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini")
 
+-- `InfiniOps` provides the operator kernels used by the `ops_shim` layer.
+-- Its sources live outside this project so we locate them via `INFINIOPS_ROOT`
+-- (the clone of `https://github.com/InfiniTensor/InfiniOps`). The library
+-- object is expected at `$INFINIOPS_ROOT/build/src/libinfiniops.so`, built
+-- with `WITH_TORCH=ON`.
+local INFINIOPS_ROOT = os.getenv("INFINIOPS_ROOT")
+if not INFINIOPS_ROOT or INFINIOPS_ROOT == "" then
+    INFINIOPS_ROOT = os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/InfiniOps"
+end
+
 set_toolchains("gcc")
 
 -- Add spdlog from third_party directory
@@ -70,6 +80,12 @@ target("_infinilm")
 
     add_linkdirs(INFINI_ROOT.."/lib")
     add_links("infinicore_cpp_api", "infiniop", "infinirt", "infiniccl")
+
+    -- `InfiniOps` headers (via the source tree) and built library.
+    add_includedirs(INFINIOPS_ROOT.."/src", { public = false })
+    add_linkdirs(INFINIOPS_ROOT.."/build/src")
+    add_links("infiniops")
+    add_rpathdirs(INFINIOPS_ROOT.."/build/src")
 
     -- Add src files
     add_files("csrc/**.cpp")
