@@ -60,7 +60,10 @@ public:
                 residual);
         }
 
-        norm_->forward_inplace(hidden_states, residual);
+        infinilm::ops_shim::rms_norm_forward_inplace(
+            hidden_states, residual,
+            static_cast<const infinicore::Tensor &>(norm_->weight()),
+            static_cast<float>(norm_->eps()));
         return hidden_states;
     }
 

@@ -14,6 +14,7 @@
 #include <base/mha_varlen.h>
 #include <base/paged_caching.h>
 #include <base/random_sample.h>
+#include <base/rms_norm.h>
 #include <base/swiglu.h>
 #include <tensor.h>
 
@@ -31,6 +32,7 @@
 #include <torch/mha_varlen/mha_varlen.h>
 #include <torch/paged_caching/paged_caching.h>
 #include <torch/random_sample/random_sample.h>
+#include <torch/rms_norm/rms_norm.h>
 #include <torch/swiglu/swiglu.h>
 
 // Each enabled-platform marker specializes `DeviceEnabled<Device::Type::X>`
@@ -295,6 +297,34 @@ infinicore::Tensor linear(const infinicore::Tensor &input,
         /*trans_b=*/std::optional<int>{1}, ops_out);
 
     return out;
+}
+
+infinicore::Tensor rms_norm(const infinicore::Tensor &input,
+                            const infinicore::Tensor &weight, float eps) {
+    auto out = infinicore::Tensor::empty(input->shape(), input->dtype(), input->device());
+    auto ops_input = to_ops_tensor(input);
+    auto ops_weight = to_ops_tensor(weight);
+    auto ops_out = to_ops_tensor(out);
+    infini::ops::Operator<infini::ops::RmsNorm>::Call(
+        make_handle(), make_config(), ops_input, ops_weight, eps, ops_out);
+    return out;
+}
+
+void rms_norm_forward_inplace(infinicore::Tensor &hidden_states,
+                              infinicore::Tensor &residual,
+                              const infinicore::Tensor &weight, float eps) {
+    if (!residual) {
+        // First layer: `residual` captures the pre-norm activations; we only
+        // normalize `hidden_states`.
+        residual = hidden_states;
+        hidden_states = rms_norm(hidden_states, weight, eps);
+    } else {
+        // Subsequent layers: fuse `residual += hidden_states` with the norm
+        // by doing the add first and then normalizing the sum.
+        auto summed = add(hidden_states, residual);
+        residual = summed;
+        hidden_states = rms_norm(summed, weight, eps);
+    }
 }
 
 } // namespace infinilm::ops_shim

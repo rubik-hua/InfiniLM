@@ -55,4 +55,18 @@ infinicore::Tensor linear(const infinicore::Tensor &input,
                           const infinicore::Tensor &weight,
                           const std::optional<infinicore::Tensor> &bias = std::nullopt);
 
+// Returns `rms_norm(input, weight, eps)`.
+infinicore::Tensor rms_norm(const infinicore::Tensor &input,
+                            const infinicore::Tensor &weight, float eps);
+
+// Fused add + RMSNorm with in-place residual semantics, matching
+// `infinicore::nn::RMSNorm::forward_inplace`:
+//   - On first call (`residual` is null), `residual` takes `hidden_states`
+//     and `hidden_states` becomes `rms_norm(hidden_states, weight, eps)`.
+//   - Otherwise `residual = hidden_states + residual`, then
+//     `hidden_states = rms_norm(residual, weight, eps)`.
+void rms_norm_forward_inplace(infinicore::Tensor &hidden_states,
+                              infinicore::Tensor &residual,
+                              const infinicore::Tensor &weight, float eps);
+
 } // namespace infinilm::ops_shim

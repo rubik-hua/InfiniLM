@@ -38,9 +38,15 @@ public:
     std::tuple<infinicore::Tensor, infinicore::Tensor> forward(const infinicore::Tensor &positions,
                                                                infinicore::Tensor &hidden_states,
                                                                infinicore::Tensor &residual) {
-        input_layernorm_->forward_inplace(hidden_states, residual);
+        infinilm::ops_shim::rms_norm_forward_inplace(
+            hidden_states, residual,
+            static_cast<const infinicore::Tensor &>(input_layernorm_->weight()),
+            static_cast<float>(input_layernorm_->eps()));
         hidden_states = self_attn_->forward(positions, hidden_states);
-        post_attention_layernorm_->forward_inplace(hidden_states, residual);
+        infinilm::ops_shim::rms_norm_forward_inplace(
+            hidden_states, residual,
+            static_cast<const infinicore::Tensor &>(post_attention_layernorm_->weight()),
+            static_cast<float>(post_attention_layernorm_->eps()));
         hidden_states = mlp_->forward(hidden_states);
         return std::make_tuple(hidden_states, residual);
     }
