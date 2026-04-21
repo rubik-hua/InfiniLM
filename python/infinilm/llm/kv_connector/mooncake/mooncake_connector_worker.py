@@ -20,21 +20,17 @@ from .mooncake_connector import (
     MooncakeXferResponseStatus,
 )
 from .mooncake_utils import MooncakeBootstrapServer, RegisterWorkerPayload
-
 from .mooncake_connector_utils import TpKVTopology
 
 import infinicore
 import asyncio
 import threading
 import time
-
 import httpx
 import msgspec
 import numpy as np
-
 import zmq
 import zmq.asyncio
-
 
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -487,18 +483,6 @@ class MooncakeConnectorWorker:
         remote_base_addr = agent_meta.kv_caches_base_addr
         block_len = self.block_len
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
-
-        if False:
-            print(
-                "==========================> _build_transfer_params:: ready_reqs ....... ",
-                ready_reqs,
-            )
-            # ready_reqs[0][1].local_block_ids = [0]
-            # layer_kv_cache = self.device_kv_caches["model.layers.0.self_attn.attn"]
-            # print(
-            #     "==========================> _build_transfer_params:: layer_kv_cache ....... ",
-            #     layer_kv_cache,
-            # )
 
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids = agent_meta.req_blocks[d_req_id]

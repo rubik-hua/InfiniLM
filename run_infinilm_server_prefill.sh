@@ -1,5 +1,10 @@
 
-export CUDA_VISIBLE_DEVICES=0
+unset http_proxy https_proxy all_proxy ALL_PROXY  
+
+export CUDA_VISIBLE_DEVICES=0,1
+
+export MC_FORCE_TCP=true
+export VLLM_MOONCAKE_PROTOCOL=tcp
 
 clear
 

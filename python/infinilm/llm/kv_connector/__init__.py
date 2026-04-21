@@ -39,8 +39,7 @@ def create_kv_connector(config: EngineConfig, role: KVConnectorRole) -> KVConnec
     assert kv_transfer_config.kv_role is not None
 
     kv_connector = kv_transfer_config.kv_connector
-    kv_role = kv_transfer_config.kv_role
-
+    
     if kv_connector in (None, "", "null"):
         return NullKVConnector()
 

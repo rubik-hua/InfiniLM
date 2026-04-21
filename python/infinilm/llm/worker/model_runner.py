@@ -257,18 +257,22 @@ class ModelRunner(KVConnectorModelRunnerMixin):
                 self.config, role=KVConnectorRole.WORKER
             )
 
-        # TODO: Mooncake: 注册kvcache
-        kv_cache_list = self.model_engine.get_kv_cache()
-        assert len(kv_cache_list) == 1
-        # TODO: 构造输入  # KV cache layer model.layers.0.self_attn.attn has shape torch.Size([2, 3572, 16, 8, 128])
-        kv_caches = {}
-        for kv_cache_vec in kv_cache_list:  # per rank kv cache
-            for layer_idx, layer_kv in enumerate(kv_cache_vec):  # per layer kv cache
-                # print(layer_kv.shape)  # shape：[2, 8, 8, 256, 128]
-                key_name = f"model.layers.{layer_idx}.self_attn.attn"
-                kv_caches[key_name] = layer_kv
-
         if self.kv_connector is not None:
+            # TODO: Mooncake: 注册kvcache
+            kv_cache_list = self.model_engine.get_kv_cache()
+            assert len(kv_cache_list) == self.config.tensor_parallel_size
+
+            # TODO: 构造输入  # KV cache layer model.layers.0.self_attn.attn has shape torch.Size([2, 3572, 16, 8, 128])
+            kv_caches = {}
+            for rank_idx, kv_cache_vec in enumerate(kv_cache_list):
+                # per layer kv cache
+                for layer_idx, layer_kv_cache in enumerate(kv_cache_vec):
+                    # print(layer_kv.shape)  # shape：[2, 8, 8, 256, 128]
+                    key_name = (
+                        f"rank.{rank_idx}.model.layers.{layer_idx}.self_attn.attn"
+                    )
+                    kv_caches[key_name] = layer_kv_cache
+
             self.kv_connector.register_kv_caches(kv_caches)
 
     # ------------------------------------------------------------------

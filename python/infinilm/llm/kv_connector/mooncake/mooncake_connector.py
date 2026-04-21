@@ -87,8 +87,6 @@ class MooncakeAgentMetadata(
 
 @dataclass
 class SendBlockMeta:
-    """Prefill 侧按 transfer_id 聚合的发送状态（异步 Event 与块列表）。"""
-
     p_req_id: ReqId
     transfer_id: TransferId
     local_block_ids: list[int]
@@ -153,22 +151,19 @@ class MooncakeConnector(KVConnectorBase):
         )
 
         if role == KVConnectorRole.SCHEDULER:
-            # TODO: MooncakeConnectorScheduler 类未实现
             from .mooncake_connector_scheduler import MooncakeConnectorScheduler
-
             self.connector_scheduler = MooncakeConnectorScheduler(
                 config, engine_id
-            )  # TODO: 后续修改为 class MooncakeConnectorScheduler的对象
+            ) 
             self.connector_worker = None
 
         elif role == KVConnectorRole.WORKER:
-            # TODO: MooncakeConnectorWorker 类未实现
             from .mooncake_connector_worker import MooncakeConnectorWorker
 
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(
                 config, engine_id
-            )  # TODO: 后续修改为 class MooncakeConnectorScheduler的对象
+            )
 
     ############################################################
     # Scheduler Side Methods

@@ -1,19 +1,13 @@
 from .mooncake_connector import ReqId, TransferId, MooncakeConnectorMetadata
 from typing import TYPE_CHECKING, Any
+from infinilm.llm.request import FinishReason
+from infinilm.llm.request import InferenceRequest as Request
 
 
 import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-from infinilm.llm.request import FinishReason
-
-
-# TODO:
-class Request:
-    kv_transfer_params = None  # 再确认
-    prompt_token_ids = None  #
-
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""

@@ -123,15 +123,15 @@ class Test:
 
         time.sleep(1)
 
-        worker_addr = "tcp://127.0.0.1:33053"  # xfer-cmpl-
+        worker_addr = "tcp://127.0.0.1:36031"  # cmpl- tcp://127.0.0.1: cmpl-
         metadata = MooncakeXferMetadata(
             remote_hostname="127.0.0.1",
             remote_port=self.rpc_port,
             remote_tp_size=1,
             remote_tp_rank=0,
             req_blocks={
-                "cmpl-d808af0209394b699c917f7c9055827e": (
-                    "xfer-cmpl-d808af0209394b699c917f7c9055827e",
+                "cmpl-d7f8e5c6659b4919938077bc1832e1f0": (
+                    "xfer-cmpl-d7f8e5c6659b4919938077bc1832e1f0",
                     [0],
                 )
             },
@@ -183,8 +183,18 @@ if __name__ == "__main__":
 
         key_name = f"model.layers.{layer_idx}.self_attn.attn"
         kv_caches[key_name] = layer_kv_cache
+    
+    # for layer_idx in range(28, 28*2):
+    #     layer_kv_cache = infinicore.empty(
+    #         (2, 8, 8, 256, 128),
+    #         dtype=infinicore.bfloat16,
+    #         device=infinicore.device("cuda", 3),
+    #     )
 
-    # print(kv_caches["model.layers.0.self_attn.attn"])
+    #     key_name = f"model.layers.{layer_idx}.self_attn.attn"
+    #     kv_caches[key_name] = layer_kv_cache
+        
+
 
     print(kv_caches["model.layers.0.self_attn.attn"])
 
@@ -192,3 +202,4 @@ if __name__ == "__main__":
     test.register_kv_caches(kv_caches)
     test.transfer_test()
     print(kv_caches["model.layers.0.self_attn.attn"])
+    # print(kv_caches["model.layers.28.self_attn.attn"])

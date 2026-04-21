@@ -310,6 +310,5 @@ class TpKVTopology:
         """Return the cache tensor(s) to register as NIXL memory regions,
         also accounting for hybrid SSM models specificities.
         """
-
         # Regular case: backends like FA register K/V in separate regions
         return cache if self.split_k_and_v else [cache]
