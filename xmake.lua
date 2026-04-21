@@ -91,9 +91,16 @@ target("_infinilm")
     add_rpathdirs(INFINIOPS_ROOT.."/build/src")
     add_defines("WITH_NVIDIA=1")
 
+    -- Compile the `.cu` dispatch TU (`csrc/ops_shim/ops_shim_cuda.cu`)
+    -- with `nvcc` so it can include `InfiniOps`' `cuda/nvidia/*/kernel.h`
+    -- headers. Other files continue to build with the host C++ compiler.
+    add_rules("cuda")
+    add_cugencodes("native")
+
     -- Add src files
     add_files("csrc/**.cpp")
     add_files("csrc/**.cc")
+    add_files("csrc/**.cu")
 
     set_installdir("python/infinilm")
 target_end()

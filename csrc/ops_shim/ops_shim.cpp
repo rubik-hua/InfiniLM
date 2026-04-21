@@ -1,5 +1,7 @@
 #include "ops_shim.hpp"
 
+#include "ops_shim_cuda.hpp"
+
 #include <infinicore/context/context.hpp>
 
 #include <config.h>
@@ -134,10 +136,15 @@ infini::ops::Tensor to_ops_tensor(const infinicore::Tensor &tensor) {
         tensor->strides()};
 }
 
-// Most `InfiniOps` operators place their PyTorch backend at implementation
-// index `1`. `Gemm` is the exception: it has two CUDA backends (`cublas` and
-// `cublasLt`) at indices `0` and `1`, and the PyTorch backend at index `2`.
-constexpr std::size_t kTorchImplementationIndex = 1;
+// Per-op implementation index: when `InfiniOps` has a native CUDA kernel
+// for an op, we prefer it over the PyTorch fallback to skip ATen dispatch
+// and `from_blob` wrapping on the hot path. The PyTorch fallback
+// (currently index `1` for every op that has one) is used only when no
+// native kernel exists.
+//
+// Measured overhead for small elementwise ops is ~12 us/call via the
+// PyTorch fallback; native kernels eliminate most of that.
+constexpr std::size_t kFallbackTorchIndex = 1;
 constexpr std::size_t kGemmTorchImplementationIndex = 2;
 
 infini::ops::Handle make_handle() {
@@ -146,7 +153,7 @@ infini::ops::Handle make_handle() {
     return handle;
 }
 
-infini::ops::Config make_config(std::size_t implementation_index = kTorchImplementationIndex) {
+infini::ops::Config make_config(std::size_t implementation_index = kFallbackTorchIndex) {
     infini::ops::Config config;
     config.set_implementation_index(implementation_index);
     return config;
@@ -156,19 +163,15 @@ infini::ops::Config make_config(std::size_t implementation_index = kTorchImpleme
 
 infinicore::Tensor add(const infinicore::Tensor &a, const infinicore::Tensor &b) {
     auto c = infinicore::Tensor::empty(a->shape(), a->dtype(), a->device());
-    auto ops_a = to_ops_tensor(a);
-    auto ops_b = to_ops_tensor(b);
-    auto ops_c = to_ops_tensor(c);
-    infini::ops::Operator<infini::ops::Add>::Call(make_handle(), make_config(), ops_a, ops_b, ops_c);
+    cuda_dispatch::add(to_ops_tensor(a), to_ops_tensor(b), to_ops_tensor(c),
+                       infinicore::context::getStream());
     return c;
 }
 
 infinicore::Tensor swiglu(const infinicore::Tensor &input, const infinicore::Tensor &gate) {
     auto out = infinicore::Tensor::empty(input->shape(), input->dtype(), input->device());
-    auto ops_input = to_ops_tensor(input);
-    auto ops_gate = to_ops_tensor(gate);
-    auto ops_out = to_ops_tensor(out);
-    infini::ops::Operator<infini::ops::Swiglu>::Call(make_handle(), make_config(), ops_input, ops_gate, ops_out);
+    cuda_dispatch::swiglu(to_ops_tensor(input), to_ops_tensor(gate),
+                          to_ops_tensor(out), infinicore::context::getStream());
     return out;
 }
 
@@ -283,20 +286,15 @@ infinicore::Tensor linear(const infinicore::Tensor &input,
         beta = 1.0f;
     }
 
-    auto ops_input = to_ops_tensor(input_2d);
-    auto ops_weight = to_ops_tensor(weight_contig);
-    auto ops_out = to_ops_tensor(out_2d);
-
     // `Gemm(a, b, alpha, beta, trans_a, trans_b, c)`:
     //   `c = alpha * op(a) @ op(b) + beta * c`.
-    // With `trans_b = 1` we compute `input @ weight.T` in one step.
-    infini::ops::Operator<infini::ops::Gemm>::Call(
-        make_handle(), make_config(kGemmTorchImplementationIndex), ops_input,
-        ops_weight,
-        /*alpha=*/std::optional<float>{1.0f},
-        /*beta=*/std::optional<float>{beta},
-        /*trans_a=*/std::optional<int>{0},
-        /*trans_b=*/std::optional<int>{1}, ops_out);
+    // With `trans_b = 1` we compute `input @ weight.T` in one step. The
+    // NVIDIA cuBLAS backend (index `0`) runs directly, skipping the
+    // `Operator::Call` cache and ATen wrapping of the PyTorch backend.
+    cuda_dispatch::gemm(to_ops_tensor(input_2d), to_ops_tensor(weight_contig),
+                        /*alpha=*/1.0f, /*beta=*/beta, /*trans_a=*/0,
+                        /*trans_b=*/1, to_ops_tensor(out_2d),
+                        infinicore::context::getStream());
 
     return out;
 }
@@ -304,11 +302,9 @@ infinicore::Tensor linear(const infinicore::Tensor &input,
 infinicore::Tensor rms_norm(const infinicore::Tensor &input,
                             const infinicore::Tensor &weight, float eps) {
     auto out = infinicore::Tensor::empty(input->shape(), input->dtype(), input->device());
-    auto ops_input = to_ops_tensor(input);
-    auto ops_weight = to_ops_tensor(weight);
-    auto ops_out = to_ops_tensor(out);
-    infini::ops::Operator<infini::ops::RmsNorm>::Call(
-        make_handle(), make_config(), ops_input, ops_weight, eps, ops_out);
+    cuda_dispatch::rms_norm(to_ops_tensor(input), to_ops_tensor(weight), eps,
+                            to_ops_tensor(out),
+                            infinicore::context::getStream());
     return out;
 }
 
