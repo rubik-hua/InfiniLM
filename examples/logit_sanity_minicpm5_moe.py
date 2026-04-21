@@ -1,4 +1,3 @@
-import ctypes
 import argparse
 import os
 import json
@@ -7,21 +6,15 @@ import tempfile
 
 import numpy as np
 
+_EX_DIR = os.path.dirname(os.path.abspath(__file__))
+if _EX_DIR not in sys.path:
+    sys.path.insert(0, _EX_DIR)
 
-def _maybe_load_flash_attn_global() -> None:
-    """Match jiuge.py: satisfy InfiniCore flash-attn symbol resolution without HPCX LD_PRELOAD ordering."""
-    if os.environ.get("INFINILM_DISABLE_FLASH_ATTN_RTLD_GLOBAL") == "1":
-        return
-    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    if os.path.isfile(fa):
-        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
+from flash_attn_preload import maybe_load_flash_attn_global
 
-
-_maybe_load_flash_attn_global()
+maybe_load_flash_attn_global()
 
 import infinicore  # before torch/transformers (same order as jiuge.py; avoids brittle pybind/Torch init)
-
-_EX_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def topk(x: np.ndarray, k: int):

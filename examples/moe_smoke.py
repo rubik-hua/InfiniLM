@@ -9,22 +9,18 @@ without requiring a full HF parity harness.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import os
+import sys
 
 import numpy as np
 
-def _maybe_load_flash_attn_global() -> None:
-    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    if not os.path.exists(fa):
-        return
-    try:
-        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
-    except OSError:
-        pass
+_ex_dir = os.path.dirname(os.path.abspath(__file__))
+if _ex_dir not in sys.path:
+    sys.path.insert(0, _ex_dir)
 
+from flash_attn_preload import maybe_load_flash_attn_global
 
-_maybe_load_flash_attn_global()
+maybe_load_flash_attn_global()
 
 import infinicore
 from infinilm.cache import PagedKVCacheConfig

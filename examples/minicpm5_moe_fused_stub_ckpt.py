@@ -19,7 +19,6 @@ Then point ``jiuge.py`` at ``--model-path /tmp/minicpm5_fused_stub_ckpt``. Use
 from __future__ import annotations
 
 import argparse
-import ctypes
 import glob
 import json
 import os
@@ -28,16 +27,13 @@ import sys
 
 import torch
 
+_ex_dir = os.path.dirname(os.path.abspath(__file__))
+if _ex_dir not in sys.path:
+    sys.path.insert(0, _ex_dir)
 
-def _maybe_load_flash_attn_global() -> None:
-    if os.environ.get("INFINILM_DISABLE_FLASH_ATTN_RTLD_GLOBAL") == "1":
-        return
-    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    if os.path.isfile(fa):
-        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
+from flash_attn_preload import maybe_load_flash_attn_global
 
-
-_maybe_load_flash_attn_global()
+maybe_load_flash_attn_global()
 
 import infinicore  # noqa: E402
 

@@ -4,6 +4,10 @@ import re
 import subprocess
 import sys
 
+_ex_dir = os.path.dirname(os.path.abspath(__file__))
+if _ex_dir not in sys.path:
+    sys.path.insert(0, _ex_dir)
+
 
 def _stable_env():
     env = os.environ.copy()
@@ -12,7 +16,9 @@ def _stable_env():
         [sys.executable, "-c", 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))'],
         text=True,
     ).strip()
-    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
+    from flash_attn_preload import resolve_flash_attn_cuda_so
+
+    fa = resolve_flash_attn_cuda_so()
     env.pop("LD_LIBRARY_PATH", None)
     env["LD_LIBRARY_PATH"] = ":".join(
         [
@@ -24,7 +30,8 @@ def _stable_env():
             "/lib/x86_64-linux-gnu",
         ]
     )
-    env["LD_PRELOAD"] = fa
+    if fa and os.path.isfile(fa):
+        env["LD_PRELOAD"] = fa
     return env
 
 

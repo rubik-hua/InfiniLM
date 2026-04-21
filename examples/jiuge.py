@@ -1,16 +1,13 @@
-import ctypes
 import os
+import sys
 
-# InfiniCore may reference flash-attn symbols; load the CUDA extension with RTLD_GLOBAL first.
-def _maybe_load_flash_attn_global() -> None:
-    if os.environ.get("INFINILM_DISABLE_FLASH_ATTN_RTLD_GLOBAL") == "1":
-        return
-    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    if os.path.isfile(fa):
-        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
+_examples_dir = os.path.dirname(os.path.abspath(__file__))
+if _examples_dir not in sys.path:
+    sys.path.insert(0, _examples_dir)
 
+from flash_attn_preload import maybe_load_flash_attn_global
 
-_maybe_load_flash_attn_global()
+maybe_load_flash_attn_global()
 
 import infinicore
 import transformers
@@ -20,7 +17,6 @@ from infinilm.modeling_utils import load_model_state_dict_by_file
 from infinilm.distributed import DistConfig
 from infinilm.infer_engine import GenerationConfig, InferEngine
 import argparse
-import sys
 import time
 import numpy as np
 from infinilm.cache import StaticKVCacheConfig, PagedKVCacheConfig

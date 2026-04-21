@@ -9,10 +9,10 @@ timing path in `InferEngine.generate(_measure_and_log_time=True)`.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import random
+import sys
 import time
 from dataclasses import asdict, dataclass
 
@@ -20,28 +20,13 @@ import numpy as np
 
 from transformers import AutoTokenizer
 
-def _maybe_load_flash_attn_global() -> None:
-    """Load flash-attn into the process with RTLD_GLOBAL if available.
+_ex_dir = os.path.dirname(os.path.abspath(__file__))
+if _ex_dir not in sys.path:
+    sys.path.insert(0, _ex_dir)
 
-    Some InfiniCore builds link flash-attn symbols at load time; preloading here
-    keeps the benchmark runnable without relying on LD_PRELOAD.
-    """
+from flash_attn_preload import maybe_load_flash_attn_global
 
-    if os.environ.get("INFINILM_DISABLE_FLASH_ATTN_RTLD_GLOBAL") == "1":
-        return
-
-    fa = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
-    if not os.path.exists(fa):
-        return
-
-    try:
-        ctypes.CDLL(fa, mode=ctypes.RTLD_GLOBAL)
-    except OSError:
-        # Best-effort: if flash-attn cannot be loaded, fall back to normal import path.
-        pass
-
-
-_maybe_load_flash_attn_global()
+maybe_load_flash_attn_global()
 
 import infinicore
 
