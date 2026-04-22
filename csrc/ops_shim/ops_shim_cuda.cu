@@ -27,6 +27,7 @@
 #include <cuda/nvidia/add/kernel.h>
 #include <cuda/nvidia/add_rms_norm/kernel.h>
 #include <cuda/nvidia/gemm/cublas.h>
+#include <cuda/nvidia/gemm/cublaslt.h>
 #include <cuda/nvidia/paged_caching/kernel.h>
 #include <cuda/nvidia/rms_norm/kernel.h>
 #include <cuda/nvidia/swiglu/kernel.h>
@@ -99,8 +100,13 @@ void paged_caching(infini::ops::Tensor k_cache, infini::ops::Tensor v_cache,
 void gemm(const infini::ops::Tensor &a, const infini::ops::Tensor &b,
           float alpha, float beta, int trans_a, int trans_b,
           infini::ops::Tensor c, void *stream) {
+    // `cublasLt` (index `1`) caches matmul descriptor + heuristic per
+    // `Operator` instance, which on the hot decode path beats the plain
+    // `cublas` backend (index `0`) that repeats algo selection every call.
+    infini::ops::Config config;
+    config.set_implementation_index(1);
     infini::ops::Operator<infini::ops::Gemm>::Call(
-        make_handle(stream), native_config(), a, b,
+        make_handle(stream), config, a, b,
         std::optional<float>{alpha}, std::optional<float>{beta},
         std::optional<int>{trans_a}, std::optional<int>{trans_b}, c);
 }

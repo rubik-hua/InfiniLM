@@ -404,9 +404,7 @@ infinicore::Tensor linear(const infinicore::Tensor &input,
 
     // `Gemm(a, b, alpha, beta, trans_a, trans_b, c)`:
     //   `c = alpha * op(a) @ op(b) + beta * c`.
-    // With `trans_b = 1` we compute `input @ weight.T` in one step. The
-    // NVIDIA cuBLAS backend (index `0`) runs directly, skipping the
-    // `Operator::Call` cache and ATen wrapping of the PyTorch backend.
+    // With `trans_b = 1` we compute `input @ weight.T` in one step.
     cuda_dispatch::gemm(to_ops_tensor(input_2d), to_ops_tensor(weight_contig),
                         /*alpha=*/1.0f, /*beta=*/beta, /*trans_a=*/0,
                         /*trans_b=*/1, to_ops_tensor(out_2d),
