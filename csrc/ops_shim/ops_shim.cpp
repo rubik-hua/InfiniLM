@@ -456,20 +456,13 @@ infinicore::Tensor rope_forward(const infinicore::nn::RoPE &module,
                                 const infinicore::Tensor &positions,
                                 std::optional<infinicore::Tensor> out) {
     INFINILM_OPS_SHIM_PROFILE(kRopeForward);
-    const bool is_neox_style =
-        module.algo() == infinicore::nn::RoPE::Algo::GPT_NEOX;
+    // Keep RoPE on `nn::RoPE::forward` rather than routing it through
+    // InfiniOps. The op is cheap (~µs / layer on decode), and its
+    // pre-computed sin/cos tables live as protected `Module` buffers that
+    // aren't reachable from outside — forwarding through the module avoids
+    // adding public accessors just to feed a different kernel.
     auto destination = out.value_or(x);
-
-    auto ops_x = to_ops_tensor(x);
-    auto ops_positions = to_ops_tensor(positions);
-    auto ops_sin = to_ops_tensor(module.sin_cache());
-    auto ops_cos = to_ops_tensor(module.cos_cache());
-    auto ops_out = to_ops_tensor(destination);
-
-    infini::ops::Operator<infini::ops::Rope>::Call(
-        make_handle(), make_config(), ops_x, ops_positions, ops_sin, ops_cos,
-        is_neox_style, ops_out);
-
+    module.forward(destination, x, positions);
     return destination;
 }
 
