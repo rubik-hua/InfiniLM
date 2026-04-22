@@ -15,7 +15,7 @@ AttentionBase::AttentionBase(std::shared_ptr<infinilm::config::ModelConfig> mode
 
     const auto &dtype{model_config->get_dtype()};
 
-    use_bias_ = model_config->get_or<bool>("attention_bias", true);
+    use_bias_ = model_config->get_or<bool>("attention_bias", false);
     use_output_bias_ = model_config->get_or<bool>("attention_output_bias", false);
 
     attention_backend_ = infinilm::global_state::get_infinilm_config().attention_backend;

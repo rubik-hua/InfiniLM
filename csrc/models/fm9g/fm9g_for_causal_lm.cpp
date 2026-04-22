@@ -9,6 +9,9 @@ std::shared_ptr<infinilm::config::ModelConfig> create_fm9g_model_config(std::sha
         size_t head_dim = model_config->get<size_t>("hidden_size") / model_config->get<size_t>("num_attention_heads");
         config_json["head_dim"] = head_dim;
     }
+    if (!config_json.contains("attention_bias")) {
+        config_json["attention_bias"] = true;
+    }
     return model_config;
 }
 
@@ -17,16 +20,6 @@ std::shared_ptr<infinilm::config::ModelConfig> create_fm9g_model_config(std::sha
 namespace {
 
 #ifndef USE_CLASSIC_LLAMA
-
-INFINILM_REGISTER_CAUSAL_LM_MODEL(
-    llama,
-    infinilm::models::fm9g::FM9GForCausalLM,
-    infinilm::models::fm9g::create_fm9g_model_config);
-
-INFINILM_REGISTER_CAUSAL_LM_MODEL(
-    qwen2,
-    infinilm::models::fm9g::FM9GForCausalLM,
-    infinilm::models::fm9g::create_fm9g_model_config);
 
 INFINILM_REGISTER_CAUSAL_LM_MODEL(
     fm9g,

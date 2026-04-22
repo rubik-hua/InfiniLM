@@ -14,7 +14,7 @@ Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config
     const auto &dtype{model_config->get_dtype()};
     size_t total_num_heads = model_config->get<size_t>("num_attention_heads");
     size_t total_num_kv_heads = model_config->get<size_t>("num_key_value_heads");
-    bool use_bias = model_config->get_or<bool>("attention_bias", true);
+    bool use_bias = model_config->get_or<bool>("attention_bias", false);
     bool use_output_bias = model_config->get_or<bool>("attention_output_bias", false);
     double rms_norm_eps = model_config->get<double>("rms_norm_eps");
 

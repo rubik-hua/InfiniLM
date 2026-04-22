@@ -11,6 +11,10 @@ std::shared_ptr<infinilm::config::ModelConfig> create_qwen3_moe_model_config(std
     if ("qwen3_moe" != model_type) {
         throw std::runtime_error("create_qwen3_moe_model_config: model_type is not qwen3_moe");
     }
+    nlohmann::json &config_json = model_config->get_config_json();
+    if (!config_json.contains("attention_bias")) {
+        config_json["attention_bias"] = true;
+    }
     return model_config;
 }
 

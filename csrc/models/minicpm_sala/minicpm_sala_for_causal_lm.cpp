@@ -43,6 +43,10 @@ std::shared_ptr<infinilm::config::ModelConfig> create_minicpm_sala_model_config(
     if ("minicpm_sala" != model_type) {
         throw std::runtime_error("infinilm::models::minicpm_sala::create_minicpm_sala_model_config: model_type is not minicpm_sala");
     }
+    nlohmann::json &config_json = model_config->get_config_json();
+    if (!config_json.contains("attention_bias")) {
+        config_json["attention_bias"] = true;
+    }
     return model_config;
 }
 

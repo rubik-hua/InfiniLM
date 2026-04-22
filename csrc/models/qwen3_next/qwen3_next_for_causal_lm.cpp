@@ -57,9 +57,6 @@ std::shared_ptr<infinilm::config::ModelConfig> create_qwen3_next_model_config(st
         config_json["layer_types"] = layer_types;
     }
 
-    if (!config_json.contains("attention_bias")) {
-        config_json["attention_bias"] = false;
-    }
     return model_config;
 }
 

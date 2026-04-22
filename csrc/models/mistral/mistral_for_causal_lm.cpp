@@ -18,10 +18,6 @@ std::shared_ptr<infinilm::config::ModelConfig> create_mistral_model_config(std::
         config_json["head_dim"] = head_dim;
     }
 
-    if (!config_json.contains("attention_bias")) {
-        config_json["attention_bias"] = false;
-    }
-
     return model_config;
 }
 
