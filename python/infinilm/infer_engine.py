@@ -278,6 +278,193 @@ class InferEngine(_infinilm.InferEngine):
 
         return output_ids
 
+    def generate_temp(
+        self,
+        input_ids,
+        generation_config,
+        *,
+        _measure_and_log_time=False,
+    ):
+        if generation_config.eos_token_id is None:
+            eos_token_id = self.config.eos_token_id
+        else:
+            eos_token_id = generation_config.eos_token_id
+        past_seq_len = 0
+        output_ids = []
+        initial_batch_size, initial_seqlen = input_ids.shape[:2]
+        seq_len = initial_seqlen
+        batch_size = initial_batch_size
+        if batch_size != 1 and generation_config.max_new_tokens is None:
+            raise ValueError(
+                "When `batch_size > 1`, `max_new_tokens` must be specified."
+            )
+        if _measure_and_log_time:
+            time_measurements = []
+        block_tables = None
+        max_blocks_per_batch = 0
+        paged_block_size = self.get_cache_config().block_size()
+        if self.enable_paged_attn:
+            max_blocks_per_batch = (
+                initial_seqlen + generation_config.max_new_tokens + paged_block_size - 1
+            ) // paged_block_size
+            block_tables_list = [
+                range(i * max_blocks_per_batch, (i + 1) * max_blocks_per_batch)
+                for i in range(batch_size)
+            ]
+            block_tables = infinicore.from_list(
+                block_tables_list,
+                dtype=infinicore.int32,
+            )
+
+        start_iter = 0
+        slot_mapping_list = []
+        slot_mapping_list.extend(
+            [0 * max_blocks_per_batch * paged_block_size + i for i in range(seq_len)]
+        )
+        print(slot_mapping_list)
+        print(batch_size)
+        print("==========================")
+
+        if True:
+            input_ids = infinicore.from_list([[151667]])
+            past_seq_len = 11
+            start_iter = 1
+            slot_mapping_list = [11]
+
+            print(slot_mapping_list)
+            print(batch_size)
+            print("==========================")
+
+            if False:
+                import torch
+
+                # kv_cache_list = self.get_kv_cache()
+                # for rank_idx, kv_cache_vec in enumerate(kv_cache_list):
+                #     for layer_idx, layer_kv_cache in enumerate(kv_cache_vec):
+                #         # print(layer_kv_cache.shape) # shape: [2, 8, 8, 256, 128]
+                #         path = f"rank.{rank_idx}.model.layers.{layer_idx}.self_attn.attn.pt"
+                #         data = torch.load(path, map_location="cpu")
+                #         data_infini = infinicore.from_torch(data)
+                #         layer_kv_cache.copy_(data_infini)
+
+            if True:
+                from .test_transfer import Test
+
+                kv_caches = {}
+                kv_cache_list = self.get_kv_cache()
+                for rank_idx, kv_cache_vec in enumerate(kv_cache_list):
+                    for layer_idx, layer_kv_cache in enumerate(kv_cache_vec):
+                        print(layer_kv_cache.shape)  # shape: [2, 8, 8, 256, 128]
+                        key_name = (
+                            f"rank.{rank_idx}.model.layers.{layer_idx}.self_attn.attn"
+                        )
+                        kv_caches[key_name] = layer_kv_cache
+                test = Test()
+                test.register_kv_caches(kv_caches)
+                test.transfer_test()
+                time.sleep(1)
+
+        for iter in range(start_iter, generation_config.max_new_tokens):
+            if _measure_and_log_time:
+                start_time = time.perf_counter()
+            batch_size, seq_len = input_ids.shape[:2]
+            if self.enable_paged_attn:
+                input_ids = input_ids.view([1, batch_size * seq_len])
+                position_ids = infinicore.from_list(
+                    list(range(past_seq_len, past_seq_len + seq_len)) * batch_size,
+                    dtype=infinicore.int64,
+                )
+
+                if iter > 0:
+                    slot_mapping_list = [
+                        i
+                        for i in range(
+                            past_seq_len,
+                            max_blocks_per_batch
+                            * paged_block_size
+                            * initial_batch_size,
+                            max_blocks_per_batch * paged_block_size,
+                        )
+                    ]
+
+                slot_mapping = infinicore.from_list(
+                    slot_mapping_list,
+                    dtype=infinicore.int64,
+                )
+            past_kv_lengths = infinicore.from_list(
+                [past_seq_len] * batch_size, dtype=infinicore.int32
+            )
+            total_kv_lengths = infinicore.from_list(
+                [past_seq_len + seq_len] * batch_size, dtype=infinicore.int32
+            )
+            cu_seqlens = infinicore.from_list(
+                [(past_seq_len + seq_len) * i for i in range(batch_size + 1)],
+                dtype=infinicore.int32,
+            )
+            input_offsets = infinicore.from_list(
+                [seq_len * i for i in range(batch_size + 1)], dtype=infinicore.int32
+            )
+            output_id = self(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_kv_lengths=past_kv_lengths,
+                total_kv_lengths=total_kv_lengths,
+                input_offsets=input_offsets,
+                cu_seqlens=cu_seqlens,
+                block_tables=block_tables,
+                slot_mapping=slot_mapping,
+                temperature=generation_config.temperature,
+                top_k=generation_config.top_k,
+                top_p=generation_config.top_p,
+            )
+
+            if False:
+                print("save kv_cache")
+                import torch
+
+                kv_cache_list = self.get_kv_cache()
+                for rank_idx, kv_cache_vec in enumerate(kv_cache_list):
+                    for layer_idx, layer_kv_cache in enumerate(kv_cache_vec):
+                        print(layer_kv_cache.shape)  # shape: [2, 8, 8, 256, 128]
+                        path = f"rank.{rank_idx}.model.layers.{layer_idx}.self_attn.attn.pt"
+                        data_numpy = layer_kv_cache.to_numpy()
+                        data_bytes = data_numpy.tobytes()
+
+                        torch_data = torch.frombuffer(
+                            data_bytes, dtype=torch.bfloat16
+                        ).view(layer_kv_cache.shape)
+                        torch.save(torch_data, path)
+
+            output_ids.append(output_id)
+            if (
+                initial_batch_size == 1
+                and generation_config.stop_on_eos
+                and generation_config.max_new_tokens is not None
+                and output_id.to_numpy()[0] in eos_token_id
+            ):
+                break
+            # start_prepare_time = time.perf_counter()
+            input_ids = output_id.view([batch_size, 1])
+            past_seq_len = past_seq_len + seq_len
+            if _measure_and_log_time:
+                end_time = time.perf_counter()
+                time_measurements.append((end_time - start_time))
+        if _measure_and_log_time:
+            print(
+                f"\n\n\n Generation completed in {round(sum(time_measurements) * 1000, 2)} ms"
+            )
+            print(
+                f" Batchsize={initial_batch_size}  Per_Batch_Input_Len={initial_seqlen}  Per_Batch_New_Tokens={len(time_measurements)}\n"
+            )
+            print(
+                f" Prefill TTFT: {round(time_measurements[0] * 1000, 2)} ms  Throughput: {round((initial_batch_size * initial_seqlen) / time_measurements[0], 2)} tok/s\n",
+            )
+            if len(time_measurements) > 1:
+                print(
+                    f" Decode  Avg ITL: {round(sum(time_measurements[1:]) * 1000 / (len(time_measurements) - 1), 2)} ms   Throughput: {round((initial_batch_size * (len(time_measurements) - 1)) / sum(time_measurements[1:]), 2)} tok/s\n",
+                )
+        return output_ids
+
     def reset_cache(self, cache_config):
         infinicore.sync_device()
         self.enable_paged_attn = isinstance(cache_config, PagedKVCacheConfig)
@@ -291,6 +478,7 @@ class InferEngine(_infinilm.InferEngine):
         get per-rank kv cache.
         """
         kv_cache_list = super().get_kv_cache()
+        infinicore.sync_device()
 
         result = []
         for rank_idx, kv_caches_per_rank in enumerate(kv_cache_list):

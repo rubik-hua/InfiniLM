@@ -97,13 +97,6 @@ class SendBlockMeta:
     sending: int = 0  # 正在进行的传输数，用于超时判断
 
 
-@dataclass
-class MooncakeConnectorOutput:
-    finished_sending: set[str] | None = None
-    finished_recving: set[str] | None = None
-    test_flag: str = "not_init"
-
-
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
@@ -152,18 +145,15 @@ class MooncakeConnector(KVConnectorBase):
 
         if role == KVConnectorRole.SCHEDULER:
             from .mooncake_connector_scheduler import MooncakeConnectorScheduler
-            self.connector_scheduler = MooncakeConnectorScheduler(
-                config, engine_id
-            ) 
+
+            self.connector_scheduler = MooncakeConnectorScheduler(config, engine_id)
             self.connector_worker = None
 
         elif role == KVConnectorRole.WORKER:
             from .mooncake_connector_worker import MooncakeConnectorWorker
 
             self.connector_scheduler = None
-            self.connector_worker = MooncakeConnectorWorker(
-                config, engine_id
-            )
+            self.connector_worker = MooncakeConnectorWorker(config, engine_id)
 
     ############################################################
     # Scheduler Side Methods

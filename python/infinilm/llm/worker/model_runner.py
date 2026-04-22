@@ -55,9 +55,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 from dataclasses import dataclass, field
-from infinilm.llm.kv_connector.mooncake.mooncake_connector import (
-    MooncakeConnectorOutput,
-)
+
+
+@dataclass
+class KVConnectorOutput:
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
+
+    # IDs of externally computed KV blocks that failed to load.
+    # Requests referencing these blocks should be rescheduled to recompute them
+    invalid_block_ids: set[int] = field(default_factory=set)  # 还没有被赋值
+
+    kv_connector_stats: Any | None = None  # 还没有被赋值
+
+    test_flag: str = "not_init"
 
 
 @dataclass
@@ -65,18 +76,10 @@ class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str] = field(default_factory=list)
 
-    # req_id -> index
-    req_id_to_index: dict[str, int] = field(default_factory=dict)
-
-    # num_reqs x num_generated_tokens
-    # num_generated_tokens is the number of tokens
-    # generated in the current step. It can be different for
-    # each request due to speculative/jump decoding.
-
     #  sampled_token_ids 就是 infinilm中的 sampled_tokens_list
     sampled_token_ids: list[int] = field(default_factory=list)
 
-    kv_connector_output: MooncakeConnectorOutput | None = None
+    kv_connector_output: KVConnectorOutput | None = None
 
 
 class KVConnectorModelRunnerMixin:
@@ -113,12 +116,8 @@ class KVConnectorModelRunnerMixin:
         Yields:
             ``KVConnectorMetadata`` or ``None`` when no active connector.
         """
-        # Fast path — no connector or NullKVConnector
-        if self.kv_connector is None or isinstance(self.kv_connector, NullKVConnector):
-            yield None
-            return
 
-        output = MooncakeConnectorOutput()
+        output = KVConnectorOutput()
 
         # 1. TODO: Mooncake: Metadata
         assert scheduler_output.kv_connector_metadata is not None
@@ -128,7 +127,6 @@ class KVConnectorModelRunnerMixin:
         )
 
         # 2. Pre-forward: start loading KV caches (receiver / decode side)
-        # TODO: Mooncake: 从mooncake拉取数据
         self.kv_connector.start_load_kv(forward_context="forward_context")
 
         try:
@@ -136,20 +134,20 @@ class KVConnectorModelRunnerMixin:
             yield output
         finally:
             # 3. Post-forward: wait for all saves (sender / prefill side)
-            # TODO: Mooncake: 等待存取数据
+
             self.kv_connector.wait_for_save()
 
-            # TODO: Mooncake: 调用 get_finished
             output.finished_sending, output.finished_recving = (
                 self.kv_connector.get_finished("finished_req_ids")
             )
             output.test_flag = "ok"
 
-            if False:
-                # TODO: Mooncake: 调用 get_kv_connector_stats
-                # 好像不用掉用
-                # kv_connector.get_kv_connector_stats()
+            output.invalid_block_ids = (
+                self.kv_connector.get_block_ids_with_load_errors()
+            )
+            output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
 
+            if False:
                 # TODO: Mooncake: 调用 get_kv_connector_kv_cache_events
                 # 好像不用掉用
                 # kv_connector.get_kv_connector_kv_cache_events()
@@ -258,11 +256,9 @@ class ModelRunner(KVConnectorModelRunnerMixin):
             )
 
         if self.kv_connector is not None:
-            # TODO: Mooncake: 注册kvcache
             kv_cache_list = self.model_engine.get_kv_cache()
             assert len(kv_cache_list) == self.config.tensor_parallel_size
-
-            # TODO: 构造输入  # KV cache layer model.layers.0.self_attn.attn has shape torch.Size([2, 3572, 16, 8, 128])
+            # KV cache layer model.layers.0.self_attn.attn has shape torch.Size([2, 3572, 16, 8, 128])
             kv_caches = {}
             for rank_idx, kv_cache_vec in enumerate(kv_cache_list):
                 # per layer kv cache
@@ -311,39 +307,21 @@ class ModelRunner(KVConnectorModelRunnerMixin):
             List of sampled token IDs, one per request in the batch.
         """
 
-        # Execute forward with KV connector hooks
-        with self.maybe_get_kv_connector_output(
-            scheduler_output,
-        ) as kv_connector_output:
-            if scheduler_output.num_requests > 0:
-                # Build model inputs from scheduler output
-                model_input_dict = scheduler_output.build_model_inputs(
-                    self.default_temperature,
-                    self.default_top_p,
-                    self.default_top_k,
-                )
-                model_input = self._prepare_model_input(model_input_dict)
-                sampled_tokens = self._model_forward(**model_input)
-            else:
-                empty_output = ModelRunnerOutput()
-                return empty_output
+        sampled_tokens_list = None
+        kv_connector_output = None
+        model_runner_output = ModelRunnerOutput()
 
-        if False:
-            # Build model inputs from scheduler output
-            model_input_dict = scheduler_output.build_model_inputs(
-                self.default_temperature,
-                self.default_top_p,
-                self.default_top_k,
-            )
-            model_input = self._prepare_model_input(model_input_dict)
-            sampled_tokens = self._model_forward(**model_input)
+        if self.kv_connector is None:
+            sampled_tokens_list = self._model_forward(scheduler_output)
+        else:
+            # Execute forward with KV connector hooks
+            with self.maybe_get_kv_connector_output(
+                scheduler_output,
+            ) as kv_connector_output:
+                if scheduler_output.num_requests > 0:
+                    sampled_tokens_list = self._model_forward(scheduler_output)
 
         # Convert to Python list
-        sampled_tokens_list = sampled_tokens.to_numpy().tolist()
-
-        assert len(sampled_tokens_list) == scheduler_output.num_requests
-
-        model_runner_output = ModelRunnerOutput()
         model_runner_output.kv_connector_output = kv_connector_output
         for i in range(scheduler_output.num_requests):
             model_runner_output.req_ids.append(
@@ -357,20 +335,25 @@ class ModelRunner(KVConnectorModelRunnerMixin):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _model_forward(self, **model_input) -> Any:
+    def _model_forward(self, scheduler_output) -> Any:
         """Run the actual model forward pass.
 
-        Separated from ``execute_model`` so that subclasses can override
-        the forward logic (e.g. for pipeline parallelism or custom
-        layer-level KV connector hooks).
-
-        Args:
-            **model_input: Model input tensors.
-
-        Returns:
-            Sampled token tensor from the model engine.
+        Sampled token tensor from the model engine.
         """
-        return self.model_engine.forward(**model_input)
+        model_input_dict = scheduler_output.build_model_inputs(
+            self.default_temperature,
+            self.default_top_p,
+            self.default_top_k,
+        )
+        model_input = self._prepare_model_input(model_input_dict)
+
+        sampled_tokens = self.model_engine.forward(**model_input)
+
+        sampled_tokens_list = sampled_tokens.to_numpy().tolist()
+
+        assert len(sampled_tokens_list) == scheduler_output.num_requests
+
+        return sampled_tokens_list
 
     @staticmethod
     def _prepare_model_input(model_input_dict: dict) -> dict:

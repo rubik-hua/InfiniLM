@@ -11,14 +11,14 @@ logger.setLevel(logging.DEBUG)
 import time
 import msgspec
 
-from python.infinilm.llm.kv_connector.mooncake.mooncake_connector import (
+from .llm.kv_connector.mooncake.mooncake_connector import (
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
 )
 import zmq
 
-from python.infinilm.llm.kv_connector.mooncake.mooncake_connector_utils import (
+from .llm.kv_connector.mooncake.mooncake_connector_utils import (
     get_ip,
     make_zmq_path,
     EngineId,
@@ -119,19 +119,16 @@ class Test:
         )
 
     def transfer_test(self):
-        print("==========================> transfer_test")
-
-        time.sleep(1)
-
-        worker_addr = "tcp://127.0.0.1:36031"  # cmpl- tcp://127.0.0.1: cmpl-
+        print("===========> transfer_test")  # tcp://127.0.0.1: cmpl- tcp://127.0.0.1:
+        worker_addr = "tcp://127.0.0.1:40989"  # cmpl- tcp://127.0.0.1: req_id=cmpl-
         metadata = MooncakeXferMetadata(
             remote_hostname="127.0.0.1",
             remote_port=self.rpc_port,
             remote_tp_size=1,
             remote_tp_rank=0,
             req_blocks={
-                "cmpl-d7f8e5c6659b4919938077bc1832e1f0": (
-                    "xfer-cmpl-d7f8e5c6659b4919938077bc1832e1f0",
+                "cmpl-fdd8c17471bf47b9a236057be1df4a64": (
+                    "xfer-cmpl-fdd8c17471bf47b9a236057be1df4a64",
                     [0],
                 )
             },
@@ -146,13 +143,12 @@ class Test:
             # If something goes wrong, let P wait timeout first (in asyncio.wait()).
 
             print("==========================> send ....... ")
-            sock.setsockopt(zmq.RCVTIMEO, 3 * 1000)
+            sock.setsockopt(zmq.RCVTIMEO, 5 * 1000)
             sock.send(encoded_data)
             print("==========================> send  over ")
 
             while True:
-                time.sleep(1)
-
+                time.sleep(2)
                 print("==========================> recv ....... ")
 
                 ret_msg = sock.recv()
@@ -183,7 +179,7 @@ if __name__ == "__main__":
 
         key_name = f"model.layers.{layer_idx}.self_attn.attn"
         kv_caches[key_name] = layer_kv_cache
-    
+
     # for layer_idx in range(28, 28*2):
     #     layer_kv_cache = infinicore.empty(
     #         (2, 8, 8, 256, 128),
@@ -193,8 +189,6 @@ if __name__ == "__main__":
 
     #     key_name = f"model.layers.{layer_idx}.self_attn.attn"
     #     kv_caches[key_name] = layer_kv_cache
-        
-
 
     print(kv_caches["model.layers.0.self_attn.attn"])
 
