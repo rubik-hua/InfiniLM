@@ -2,7 +2,7 @@
 #include "../../../handle.h"
 #include "infiniop/ops/dequant/per_tensor_dequant_int8.h"
 
-#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_QY_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_QY_API) || defined(ENABLE_ILUVATAR_API)
 #include "nvidia/per_tensor_dequant_int8_nvidia.cuh"
 #endif
 
@@ -28,6 +28,9 @@ __INFINI_C infiniStatus_t infiniopCreatePerTensorDequantI8Descriptor(infiniopHan
 #ifdef ENABLE_QY_API
         CREATE(INFINI_DEVICE_QY, nvidia)
 #endif
+#ifdef ENABLE_ILUVATAR_API
+        CREATE(INFINI_DEVICE_ILUVATAR, nvidia)
+#endif
 
     default:
         return INFINI_STATUS_DEVICE_TYPE_NOT_SUPPORTED;
@@ -46,6 +49,9 @@ __INFINI_C infiniStatus_t infiniopGetPerTensorDequantI8WorkspaceSize(infiniopPer
 #endif
 #ifdef ENABLE_QY_API
         GET(INFINI_DEVICE_QY, nvidia)
+#endif
+#ifdef ENABLE_ILUVATAR_API
+        GET(INFINI_DEVICE_ILUVATAR, nvidia)
 #endif
 
     default:
@@ -74,6 +80,9 @@ __INFINI_C infiniStatus_t infiniopPerTensorDequantI8(infiniopPerTensorDequantI8D
 #ifdef ENABLE_QY_API
         DEQUANT(INFINI_DEVICE_QY, nvidia)
 #endif
+#ifdef ENABLE_ILUVATAR_API
+        DEQUANT(INFINI_DEVICE_ILUVATAR, nvidia)
+#endif
 
     default:
         return INFINI_STATUS_DEVICE_TYPE_NOT_SUPPORTED;
@@ -93,6 +102,9 @@ __INFINI_C infiniStatus_t infiniopDestroyPerTensorDequantI8Descriptor(infiniopPe
 #endif
 #ifdef ENABLE_QY_API
         DESTROY(INFINI_DEVICE_QY, nvidia)
+#endif
+#ifdef ENABLE_ILUVATAR_API
+        DESTROY(INFINI_DEVICE_ILUVATAR, nvidia)
 #endif
 
     default:
