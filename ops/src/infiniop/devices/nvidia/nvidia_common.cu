@@ -12,6 +12,17 @@ auto Handle::internal() const -> const std::shared_ptr<Internal> & {
     return _internal;
 }
 
+Handle::Internal::~Internal() {
+    if (capture_blas_handle_ != nullptr) {
+        cublasDestroy(capture_blas_handle_);
+    }
+#ifdef ENABLE_CUDNN_API
+    if (capture_dnn_handle_ != nullptr) {
+        cudnnDestroy(capture_dnn_handle_);
+    }
+#endif
+}
+
 Handle::Internal::Internal(int device_id) {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, device_id);
@@ -29,7 +40,27 @@ Handle::Internal::Internal(int device_id) {
 #endif
 }
 
+// CUDA Graph capture mode flag — see header.
+namespace {
+bool g_capture_mode = false;
+} // namespace
+
+bool Handle::Internal::isCaptureMode() { return g_capture_mode; }
+void Handle::Internal::setCaptureMode(bool enabled) { g_capture_mode = enabled; }
+
 infiniStatus_t Handle::Internal::useCublas(cudaStream_t stream, const Fn<cublasHandle_t> &f) const {
+    if (g_capture_mode) {
+        // During graph capture, use a single dedicated handle whose stream
+        // binding was already established before BeginCapture. We must NOT
+        // call cublasSetStream here — on iluvatar's ixblas it triggers
+        // host-side state changes that break stream capture and produce
+        // wrong replay results.
+        if (capture_blas_handle_ == nullptr) {
+            CHECK_CUBLAS(cublasCreate(&capture_blas_handle_));
+            CHECK_CUBLAS(cublasSetStream(capture_blas_handle_, stream));
+        }
+        return f(capture_blas_handle_);
+    }
     auto handle = blas_handles.pop();
     if (!handle) {
         CHECK_CUBLAS(cublasCreate(&(*handle)));
@@ -42,6 +73,13 @@ infiniStatus_t Handle::Internal::useCublas(cudaStream_t stream, const Fn<cublasH
 
 #ifdef ENABLE_CUDNN_API
 infiniStatus_t Handle::Internal::useCudnn(cudaStream_t stream, const Fn<cudnnHandle_t> &f) const {
+    if (g_capture_mode) {
+        if (capture_dnn_handle_ == nullptr) {
+            CHECK_CUDNN(cudnnCreate(&capture_dnn_handle_));
+            CHECK_CUDNN(cudnnSetStream(capture_dnn_handle_, stream));
+        }
+        return f(capture_dnn_handle_);
+    }
     auto handle = dnn_handles.pop();
     if (!handle) {
         CHECK_CUDNN(cudnnCreate(&(*handle)));

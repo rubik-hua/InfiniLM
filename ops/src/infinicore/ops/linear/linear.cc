@@ -2,6 +2,9 @@
 #include "infinicore/ops/gemm.hpp"
 #include "infinicore/ops/rearrange.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+
 namespace infinicore::op {
 
 Tensor linear(Tensor input,
@@ -15,6 +18,35 @@ Tensor linear(Tensor input,
     auto output_shape = input->shape();
     output_shape[ndim - 1] = out_features;
     auto out = Tensor::empty(output_shape, input->dtype(), input->device());
+
+    // Iluvatar workaround: ixblas picks a capture-unfriendly cublas algo when
+    // a GEMM's output dim exceeds ~65k (e.g. lm_head with vocab_size ~152k).
+    // INFINILM_LINEAR_CHUNK_OUT=N splits any such GEMM along the output dim
+    // into chunks of size <= N. Each chunk MUST write to an independent
+    // contiguous buffer (cublas selects algo by leading dim, not by shape;
+    // writing into a narrow view of the big output keeps ld large and does
+    // not bypass the broken algo).
+    static const char *chunk_env_ = std::getenv("INFINILM_LINEAR_CHUNK_OUT");
+    static const Size chunk_threshold = chunk_env_ ? (Size)std::atoi(chunk_env_) : 0;
+    if (chunk_threshold > 0 && out_features > chunk_threshold) {
+        for (Size start = 0; start < out_features; start += chunk_threshold) {
+            Size len = std::min(chunk_threshold, out_features - start);
+            auto weight_chunk = weight->narrow({{0, start, len}});
+            std::optional<Tensor> bias_chunk = bias.has_value()
+                ? std::make_optional(bias.value()->narrow({{0, start, len}}))
+                : std::nullopt;
+
+            auto chunk_shape = input->shape();
+            chunk_shape[ndim - 1] = len;
+            auto chunk_out = Tensor::empty(chunk_shape, input->dtype(), input->device());
+
+            linear_(chunk_out, input, weight_chunk, bias_chunk);
+
+            auto out_slice = out->narrow({{ndim - 1, start, len}});
+            rearrange_(out_slice, chunk_out);
+        }
+        return out;
+    }
 
     // Inplace Calculate
     linear_(out, input, weight, bias);

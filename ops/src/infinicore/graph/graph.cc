@@ -4,6 +4,11 @@
 #include "infinicore/context/context.hpp"
 #include <infinirt.h>
 
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ILUVATAR_API) || defined(ENABLE_QY_API)
+#include "../../infiniop/devices/nvidia/nvidia_handle.cuh"
+#define INFINICORE_HAS_NVIDIA_HANDLE 1
+#endif
+
 namespace infinicore::graph {
 
 /* =========================
@@ -73,43 +78,69 @@ void Graph::add_operator(std::shared_ptr<GraphOperator> op) {
 }
 
 void Graph::instantiate() {
-    // Reset device graph
     device_graph_ = std::make_unique<DeviceGraph>();
 
-    // warmup
-    for (size_t iter = 0; iter < 5; ++iter) {
+    // Eager warmup. Empirically 4 iterations are needed for cublas algo
+    // selection / autotuner caches to stabilize; without them the captured
+    // graph references not-yet-pinned algo state and replays wrong.
+    constexpr size_t kEagerWarmupIters = 4;
+    for (size_t iter = 0; iter < kEagerWarmupIters; ++iter) {
         this->run();
     }
-    infinicore::context::syncStream();
+    // Full-device sync (not just stream): cublas/cudnn use helper streams that
+    // can still have work in flight when only the active stream is drained,
+    // racing with the kernels we are about to capture.
+    context::syncDevice();
 
-    if (infinirtStreamBeginCapture(
-            context::getStream(),
-            INFINIRT_STREAM_CAPTURE_MODE_RELAXED)
-        != INFINI_STATUS_SUCCESS) {
+#ifdef INFINICORE_HAS_NVIDIA_HANDLE
+    device::nvidia::Handle::Internal::setCaptureMode(true);
+#endif
+
+    // One more warmup under capture-mode flag so the dedicated capture
+    // cublas/cudnn handles get lazily created and stream-bound before
+    // BeginCapture; without this the first capture observes an unconfigured
+    // handle and produces wrong output.
+    this->run();
+    context::syncDevice();
+
+    auto begin_status = infinirtStreamBeginCapture(
+        context::getStream(),
+        INFINIRT_STREAM_CAPTURE_MODE_RELAXED);
+    if (begin_status != INFINI_STATUS_SUCCESS) {
+        spdlog::warn("[graph] StreamBeginCapture failed: status={}", (int)begin_status);
+#ifdef INFINICORE_HAS_NVIDIA_HANDLE
+        device::nvidia::Handle::Internal::setCaptureMode(false);
+#endif
         return;
     }
 
-    // Run and record
     this->run();
 
-    if (infinirtStreamEndCapture(
-            context::getStream(),
-            &device_graph_.get()->graph)
-        != INFINI_STATUS_SUCCESS) {
+    auto end_status = infinirtStreamEndCapture(
+        context::getStream(),
+        &device_graph_.get()->graph);
+
+#ifdef INFINICORE_HAS_NVIDIA_HANDLE
+    device::nvidia::Handle::Internal::setCaptureMode(false);
+#endif
+
+    if (end_status != INFINI_STATUS_SUCCESS) {
+        spdlog::warn("[graph] StreamEndCapture failed: status={}", (int)end_status);
         return;
     }
 
-    if (infinirtGraphInstantiate(
-            &device_graph_.get()->exec,
-            device_graph_.get()->graph,
-            &device_graph_.get()->node,
-            device_graph_.get()->log_buffer.data(),
-            device_graph_.get()->log_buffer.size())
-        != INFINI_STATUS_SUCCESS) {
+    auto inst_status = infinirtGraphInstantiate(
+        &device_graph_.get()->exec,
+        device_graph_.get()->graph,
+        &device_graph_.get()->node,
+        device_graph_.get()->log_buffer.data(),
+        device_graph_.get()->log_buffer.size());
+    if (inst_status != INFINI_STATUS_SUCCESS) {
         static bool warned_once = false;
         if (!warned_once) {
             warned_once = true;
-            spdlog::warn("Fail to instantiate device graph: {}", std::string(device_graph_.get()->log_buffer.data()));
+            spdlog::warn("Fail to instantiate device graph: {}",
+                         std::string(device_graph_.get()->log_buffer.data()));
         }
     }
 }

@@ -51,18 +51,29 @@ std::byte *PinnableBlockAllocator::allocate(size_t size) {
     for (auto &cls : size_classes_) {
         if (size <= cls.block_size) {
             if (!cls.free_blocks.empty()) {
-                block = cls.free_blocks.back();
-                while (block != nullptr && block->in_use) {
-                    cls.free_blocks.pop_back();
-                    if (cls.free_blocks.empty()) {
-                        block = nullptr;
+                // Skip blocks that are either still in use or frozen-but-not-
+                // pinned-mode-now: a frozen block was given to a captured
+                // CUDA graph and must NOT be reused for non-graph allocations
+                // until either pinned_mode_ resumes (same graph capture cycle
+                // can reuse them safely) or trim() releases them.
+                size_t scan = cls.free_blocks.size();
+                block = nullptr;
+                while (scan > 0) {
+                    --scan;
+                    auto &candidate = cls.free_blocks[scan];
+                    if (!candidate->in_use && (!candidate->frozen || pinned_mode_)) {
+                        block = candidate;
+                        cls.free_blocks.erase(cls.free_blocks.begin() + scan);
                         break;
                     }
-                    block = cls.free_blocks.back();
                 }
                 if (block != nullptr) {
-                    cls.free_blocks.pop_back();
                     block->in_use = true;
+                    // Freeze is sticky: once a block is handed to a captured graph
+                    // it stays frozen until trim() releases it.
+                    if (pinned_mode_) {
+                        block->frozen = true;
+                    }
                     return reinterpret_cast<std::byte *>(block->ptr);
                 }
             }
@@ -80,14 +91,19 @@ std::byte *PinnableBlockAllocator::allocate(size_t size) {
     }
 
     // 2. Large block allocation
-    // Try to reuse a frozen or free large block
+    // Reuse a free non-frozen large block (frozen blocks belong to a captured
+    // CUDA graph and must be skipped unless we're currently in pinned mode).
     auto it = std::find_if(large_blocks_.begin(), large_blocks_.end(),
-                           [size](const std::shared_ptr<Block> &b) { return b->size >= size && !b->in_use; });
+                           [this, size](const std::shared_ptr<Block> &b) {
+                               return b->size >= size && !b->in_use && (!b->frozen || pinned_mode_);
+                           });
 
     if (it != large_blocks_.end()) {
         block = *it;
         block->in_use = true;
-        block->frozen = block->frozen || pinned_mode_;
+        if (pinned_mode_) {
+            block->frozen = true;
+        }
         return reinterpret_cast<std::byte *>(block->ptr);
     }
 

@@ -22,6 +22,15 @@ class Handle::Internal {
     Pool<cudnnHandle_t> dnn_handles;
 #endif
 
+    // CUDA Graph capture mode: when active, useCublas/useCudnn skip the
+    // pool-pop/push and cublasSetStream calls (which break stream capture
+    // semantics on iluvatar's ixblas). Instead they use a single pre-warmed
+    // handle whose stream binding was set up before BeginCapture.
+    mutable cublasHandle_t capture_blas_handle_ = nullptr;
+#ifdef ENABLE_CUDNN_API
+    mutable cudnnHandle_t capture_dnn_handle_ = nullptr;
+#endif
+
     int _warp_size,
         _max_threads_per_block,
         _block_size[3],
@@ -32,11 +41,18 @@ class Handle::Internal {
 
 public:
     Internal(int);
+    ~Internal();
 
     infiniStatus_t useCublas(cudaStream_t stream, const Fn<cublasHandle_t> &f) const;
 #ifdef ENABLE_CUDNN_API
     infiniStatus_t useCudnn(cudaStream_t stream, const Fn<cudnnHandle_t> &f) const;
 #endif
+
+    // Process-global capture-mode flag. Assumes graph capture is single-flight
+    // and non-reentrant: Graph::instantiate() pairs setCaptureMode(true)/(false)
+    // around a single cudaStreamBeginCapture/EndCapture window.
+    static bool isCaptureMode();
+    static void setCaptureMode(bool enabled);
 
     int warpSize() const;
     int maxThreadsPerBlock() const;
