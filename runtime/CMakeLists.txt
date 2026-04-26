@@ -62,12 +62,22 @@ target_compile_options(infinirt PRIVATE
 )
 
 if(INFINIRT_ENABLE_NVIDIA)
-    set_target_properties(infinirt PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    )
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
-        set_target_properties(infinirt PROPERTIES CUDA_ARCHITECTURES native)
+    if(INFINI_NV_BACKEND STREQUAL "HYGON")
+        # DTK's device-link step drops device code when SEPARABLE_COMPILATION is on;
+        # keep it OFF. CUDA arch 75 — DTK's nvcc shim translates sm_75 to the full
+        # DCU set (gfx906;gfx926;gfx928;gfx936;gfx938) internally.
+        set_target_properties(infinirt PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+            set_target_properties(infinirt PROPERTIES CUDA_ARCHITECTURES "75")
+        endif()
+    else()
+        set_target_properties(infinirt PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        )
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+            set_target_properties(infinirt PROPERTIES CUDA_ARCHITECTURES native)
+        endif()
     endif()
     if(CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
         # Iluvatar Corex uses Clang-CUDA; the nvcc-only flags below are unknown to it.
@@ -75,6 +85,11 @@ if(INFINIRT_ENABLE_NVIDIA)
             $<$<COMPILE_LANGUAGE:CUDA>:-fPIC>
             $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unknown-cuda-version>
             $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-command-line-argument>
+        )
+    elseif(INFINI_NV_BACKEND STREQUAL "HYGON")
+        # DTK's nvcc shim is dcc-based and rejects --expt-relaxed-constexpr / --extended-lambda.
+        target_compile_options(infinirt PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
         )
     else()
         target_compile_options(infinirt PRIVATE

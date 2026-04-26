@@ -1,4 +1,4 @@
-#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API) || defined(ENABLE_ILUVATAR_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API) || defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -24,6 +24,11 @@ constexpr size_t ceilDiv(size_t a, size_t b) {
 inline const char *default_prefill_kernel(const PagedAttentionPrefillInfo &info) {
     // Iluvatar: use warp (stable). Users can override via INFINIOP_FLASH_PREFILL_KERNEL.
 #ifdef ENABLE_ILUVATAR_API
+    (void)info;
+    return "warp";
+#endif
+#ifdef ENABLE_HYGON_API
+    // Hygon DCU lacks nvcuda::wmma; force the warp (CUDA-core) kernel.
     (void)info;
     return "warp";
 #endif

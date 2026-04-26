@@ -1,3 +1,8 @@
+// On Hygon, flash-attn is provided via dlsym in a separate hipcc-compiled TU
+// (flash_attn_hygon_dlsym.cc). That file registers MhaKVCache for all devices,
+// so this TU compiles to nothing under Hygon.
+#if !defined(ENABLE_FLASH_ATTN_DLSYM)
+
 #include "infinicore/ops/mha_kvcache.hpp"
 
 #include "infinicore/adaptor/flash_attention_adaptor.hpp"
@@ -38,7 +43,7 @@ void run(void *planned_meta) {
 
     auto out_tensor = infinicore::adaptor::to_aten_tensor(p->out);
     auto q = infinicore::adaptor::to_aten_tensor(p->q);
-#if defined(ENABLE_NVIDIA_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_HYGON_API)
     auto k_cache = infinicore::adaptor::to_aten_tensor(p->k_cache);
     auto v_cache = infinicore::adaptor::to_aten_tensor(p->v_cache);
 #elif defined(ENABLE_QY_API)
@@ -103,3 +108,5 @@ void cleanup(void **planned_meta_ptr) {
 INFINICORE_GRAPH_OP_REGISTER_ALLDEVICE(MhaKVCache, &plan, &run, &cleanup);
 
 } // namespace infinicore::op::mha_kvcache_impl::flashattn
+
+#endif // !ENABLE_FLASH_ATTN_DLSYM

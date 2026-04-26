@@ -9,6 +9,16 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Umbrella backend selector. When ON, drives the cuda/*.cu sources through DTK's
+# CUDA-compat shim with ENABLE_HYGON_API. The runtime/ccl/ops subprojects all
+# read `INFINI_NV_BACKEND` to pick which CUDA-API-compatible backend the cuda/
+# sources implement (NVIDIA / ILUVATAR / QY / HYGON / ALI).
+option(INFINILM_ENABLE_HYGON "Build for Hygon DCU (DTK/HIP) instead of NVIDIA" OFF)
+if(INFINILM_ENABLE_HYGON)
+    message(STATUS "INFINILM_ENABLE_HYGON=ON → INFINI_NV_BACKEND=HYGON.")
+    set(INFINI_NV_BACKEND "HYGON" CACHE STRING "" FORCE)
+endif()
+
 # Subprojects - each builds as standalone too.
 add_subdirectory(runtime)     # libinfinirt.so
 add_subdirectory(ccl)         # libinfiniccl.so
@@ -79,8 +89,10 @@ if(INFINILM_BUILD_PYBIND)
     set_target_properties(infiniccl PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${INFINILM_PY_PKG_DIR}/lib")
     set_target_properties(infinicore PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${INFINILM_PY_PKG_DIR}/lib")
     install(TARGETS infinirt infiniccl infinicore LIBRARY DESTINATION "${INFINILM_PY_PKG_DIR}/lib")
-    if(TARGET flash-attn-nvidia)
-        set_target_properties(flash-attn-nvidia PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${INFINILM_PY_PKG_DIR}/lib")
-        install(TARGETS flash-attn-nvidia LIBRARY DESTINATION "${INFINILM_PY_PKG_DIR}/lib")
-    endif()
+    foreach(_fa_tgt flash-attn-nvidia flash-attn-hygon flash_attn_hygon_dlsym)
+        if(TARGET ${_fa_tgt})
+            set_target_properties(${_fa_tgt} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${INFINILM_PY_PKG_DIR}/lib")
+            install(TARGETS ${_fa_tgt} LIBRARY DESTINATION "${INFINILM_PY_PKG_DIR}/lib")
+        endif()
+    endforeach()
 endif()

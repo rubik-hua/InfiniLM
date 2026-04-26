@@ -1,3 +1,8 @@
+// On Hygon, flash-attn is provided via dlsym in a separate hipcc-compiled TU
+// (flash_attn_hygon_dlsym.cc). That file registers MultiheadAttentionVarlen for
+// all devices, so this TU compiles to nothing under Hygon.
+#if !defined(ENABLE_FLASH_ATTN_DLSYM)
+
 #include "infinicore/ops/mha_varlen.hpp"
 
 #include "infinicore/adaptor/flash_attention_adaptor.hpp"
@@ -94,3 +99,5 @@ void cleanup(void **planned_meta_ptr) {
 INFINICORE_GRAPH_OP_REGISTER_ALLDEVICE(MultiheadAttentionVarlen, &plan, &run, &cleanup);
 
 } // namespace infinicore::op::mha_varlen_impl::flashattn
+
+#endif // !ENABLE_FLASH_ATTN_DLSYM

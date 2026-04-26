@@ -2,24 +2,33 @@
 Build orchestration for InfiniLM.
 
 Environment knobs (read at install/build time):
+  INFINILM_ENABLE_HYGON=1
+      Build for Hygon DCU (DTK/HIP) instead of NVIDIA. Source DTK env first
+      (e.g. `source /opt/dtk/env.sh`) so hipcc, hipblas, and rccl are findable.
+      Defaults to OFF (NVIDIA build).
+
   INFINILM_BUILD_FLASH_ATTN=1
       Enable the FlashAttention backend. When set, flash-attention source is
       auto-cloned to third_party/flash-attention if missing, and the resulting
-      libflash-attn-nvidia.so is co-located with libinfinicore.so.
+      libflash-attn-{nvidia,hygon}.so is co-located with libinfinicore.so.
+      Under INFINILM_ENABLE_HYGON, the auto-clone default URL does NOT match a
+      DTK-buildable fork; provide INFINILM_FLASH_ATTN_DIR (or a Hygon-specific
+      INFINILM_FLASH_ATTN_REPO) explicitly.
 
   INFINILM_FLASH_ATTN_REPO=<git url>
       Git URL for the flash-attention fork.
-      Default: https://github.com/vllm-project/flash-attention.git
+      Default: https://github.com/vllm-project/flash-attention.git (NVIDIA-only).
 
   INFINILM_FLASH_ATTN_REF=<branch|tag|commit>
       Git ref to check out. Default: main.
 
   INFINILM_FLASH_ATTN_DIR=/abs/path
-      Pre-existing flash-attention checkout to use instead of cloning.
+      Pre-existing flash-attention checkout to use instead of cloning. Required
+      under INFINILM_ENABLE_HYGON if INFINILM_BUILD_FLASH_ATTN=1.
 
-  INFINILM_FLASH_ATTN_ARCHS=80;86;89;90
-      CUDA SM list to compile flash-attn for. Default: 80;86;89;90.
-      Single arch (e.g. "80") shrinks libflash-attn-nvidia.so by ~4x.
+  INFINILM_FLASH_ATTN_ARCHS=80;86;89;90  (NVIDIA)  |  gfx906;gfx926;...  (Hygon)
+      Architecture list. Default for NVIDIA: 80. Default for Hygon: full DCU set.
+      Single arch shrinks the .so by ~4x.
 
   INFINILM_BUILD_TYPE=Release|Debug|RelWithDebInfo
       CMake build type. Default: Release.
@@ -92,14 +101,24 @@ def _ensure_flash_attn_dir() -> Path | None:
 def build_cpp_module():
     BUILD_DIR.mkdir(exist_ok=True)
 
+    enable_hygon = _env_bool("INFINILM_ENABLE_HYGON")
+
     cmake_args = [
         "cmake",
         "-S", str(ROOT),
         "-B", str(BUILD_DIR),
         f"-DCMAKE_BUILD_TYPE={os.environ.get('INFINILM_BUILD_TYPE', 'Release')}",
+        f"-DINFINILM_ENABLE_HYGON={'ON' if enable_hygon else 'OFF'}",
     ]
 
     fa_dir = _ensure_flash_attn_dir()
+    if enable_hygon and _env_bool("INFINILM_BUILD_FLASH_ATTN") and not fa_dir:
+        raise RuntimeError(
+            "INFINILM_ENABLE_HYGON=1 + INFINILM_BUILD_FLASH_ATTN=1 requires "
+            "INFINILM_FLASH_ATTN_DIR pointing at a DTK-buildable flash-attention "
+            "source fork (the same source that produced your installed "
+            "flash_attn==*.dtk* wheel). The default vllm-project fork is NVIDIA-only."
+        )
     # Always pass the option so we override any stale CMake cache from a
     # previous configure. Empty value disables flash-attn cleanly.
     cmake_args.append(f"-DINFINIOPS_FLASH_ATTN_DIR={fa_dir or ''}")

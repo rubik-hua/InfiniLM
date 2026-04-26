@@ -10,6 +10,10 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #endif
+// Hygon (DTK) ships a HIP-flavored libtorch; pulling <c10/cuda/...> under that
+// build breaks because c10/cuda/impl/cuda_cmake_macros.h is missing. Hygon
+// flash-attn glue lives in a separate hipcc-compiled TU and uses <c10/hip/...>
+// directly; this header stays cuda-compat-clean under Hygon.
 
 namespace infinicore::adaptor {
 inline at::ScalarType to_at_dtype(DataType dtype) {
@@ -35,6 +39,10 @@ inline at::Device to_at_device(const Device &device) {
     } else if (device.getType() == Device::Type::CPU) {
         return at::Device(at::kCPU);
     } else if (device.getType() == Device::Type::QY) {
+        return at::Device(at::kCUDA, device.getIndex());
+    } else if (device.getType() == Device::Type::HYGON) {
+        // DTK's libtorch maps DCU to at::kCUDA via the "MasqueradingAsCUDA"
+        // shim (see <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>).
         return at::Device(at::kCUDA, device.getIndex());
     } else {
         throw std::runtime_error("Unsupported device type for ATen");

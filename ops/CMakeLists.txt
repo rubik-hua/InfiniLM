@@ -77,11 +77,12 @@ if(INFINIOPS_ENABLE_NVIDIA)
     if(INFINIOPS_ENABLE_CUDNN)
         # Debian/Ubuntu ship cuDNN headers under /usr/include/x86_64-linux-gnu;
         # NVIDIA tarball under $CUDNN_ROOT/include; Iluvatar Corex under
-        # $CUDNN_ROOT/include with libs in lib64.
+        # $CUDNN_ROOT/include with libs in lib64; DTK ships cuDNN under
+        # /opt/dtk/cuda/cuda-12/targets/x86_64-linux.
         find_path(CUDNN_INCLUDE_DIR cudnn.h
             HINTS
                 $ENV{CUDNN_ROOT} $ENV{CUDNN_HOME} $ENV{CUDNN_PATH}
-                /usr/local/cuda
+                /usr/local/cuda /opt/dtk/cuda/cuda-12/targets/x86_64-linux
             PATH_SUFFIXES include x86_64-linux-gnu
         )
         if(NOT CUDNN_INCLUDE_DIR)
@@ -90,7 +91,7 @@ if(INFINIOPS_ENABLE_NVIDIA)
         find_library(CUDNN_LIB cudnn
             HINTS
                 $ENV{CUDNN_ROOT} $ENV{CUDNN_HOME} $ENV{CUDNN_PATH}
-                /usr/local/cuda
+                /usr/local/cuda /opt/dtk/cuda/cuda-12/targets/x86_64-linux
             PATH_SUFFIXES lib64 lib lib/x86_64-linux-gnu
         )
         if(CUDNN_LIB)
@@ -170,12 +171,22 @@ target_compile_options(infinicore PRIVATE
 )
 
 if(INFINIOPS_ENABLE_NVIDIA)
-    set_target_properties(infinicore PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    )
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
-        set_target_properties(infinicore PROPERTIES CUDA_ARCHITECTURES native)
+    if(INFINI_NV_BACKEND STREQUAL "HYGON")
+        # DTK's device-link step drops gfx fatbin from the final shared lib when
+        # SEPARABLE_COMPILATION is on; force OFF for Hygon. Pin arch to 75 — DTK's
+        # nvcc shim translates it to the full DCU set internally.
+        set_target_properties(infinicore PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+            set_target_properties(infinicore PROPERTIES CUDA_ARCHITECTURES "75")
+        endif()
+    else()
+        set_target_properties(infinicore PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        )
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+            set_target_properties(infinicore PROPERTIES CUDA_ARCHITECTURES native)
+        endif()
     endif()
     if(CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
         target_compile_options(infinicore PRIVATE
@@ -184,6 +195,13 @@ if(INFINIOPS_ENABLE_NVIDIA)
             $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-command-line-argument>
             $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-declarations>
             $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-function>
+        )
+    elseif(INFINI_NV_BACKEND STREQUAL "HYGON")
+        # DTK's nvcc shim is dcc-based and rejects --expt-relaxed-constexpr / --extended-lambda.
+        target_compile_options(infinicore PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-deprecated-declarations>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-unused-function>
         )
     else()
         target_compile_options(infinicore PRIVATE
@@ -204,16 +222,101 @@ endif()
 
 target_link_libraries(infinicore PUBLIC infinirt infiniccl PRIVATE ${INFINIOP_LINK_LIBS})
 
-# ---- Flash-attention (optional) ----
+# ---- Flash-attention via dlsym for Hygon ----
+# Under Hygon (DTK), the system flash_attn_2_cuda*.so wheel provides the kernels
+# but it's a Python extension — not C++-ABI-link-compatible. Resolve symbols at
+# runtime via dlsym from a small hipcc-compiled wrapper TU. No INFINIOPS_FLASH_ATTN_DIR
+# needed; user just `pip install flash_attn` (DTK fork already provides it).
+option(INFINIOPS_FLASH_ATTN_HYGON_DLSYM "Hygon: provide flash-attn via dlsym from system flash_attn_2_cuda*.so" ON)
+
+if(INFINI_NV_BACKEND STREQUAL "HYGON" AND INFINIOPS_FLASH_ATTN_HYGON_DLSYM)
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import torch, os; print(os.path.dirname(torch.__file__))"
+        OUTPUT_VARIABLE TORCH_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _torch_rc
+    )
+    if(NOT _torch_rc EQUAL 0 OR TORCH_DIR STREQUAL "")
+        message(FATAL_ERROR "PyTorch not importable; Hygon flash-attn glue needs ATen headers (pip install torch).")
+    endif()
+    message(STATUS "Hygon flash-attn dlsym: torch dir = ${TORCH_DIR}")
+
+    # The wrapper is host-only C++ (HIPStreamGuard + dlsym). Compile with plain
+    # g++ — using HIP language would auto-include clang's HIP runtime wrapper
+    # and conflict with DTK's cuda-compat <vector_types.h> via CPLUS_INCLUDE_PATH.
+    # We just need __HIP_PLATFORM_AMD__ to be defined so c10/hip headers pick the
+    # right type aliases.
+    set(_fa_hygon_src "${CMAKE_CURRENT_SOURCE_DIR}/src/infinicore/adaptor/flash_attn_hygon_dlsym.cc")
+
+    add_library(flash_attn_hygon_dlsym SHARED "${_fa_hygon_src}")
+    target_compile_definitions(flash_attn_hygon_dlsym PRIVATE
+        __HIP_PLATFORM_AMD__
+        ENABLE_FLASH_ATTN
+        ENABLE_ATEN
+        ENABLE_FLASH_ATTN_DLSYM
+        ENABLE_HYGON_API
+    )
+    target_include_directories(flash_attn_hygon_dlsym PRIVATE
+        "${TORCH_DIR}/include"
+        "${TORCH_DIR}/include/torch/csrc/api/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${SPDLOG_INCLUDE}"
+        "${JSON_INCLUDE}"
+        "/opt/dtk/include"      # for <hip/hip_runtime_api.h>
+    )
+    target_compile_options(flash_attn_hygon_dlsym PRIVATE
+        -Wno-deprecated-declarations
+        -Wno-unused-function
+    )
+    target_link_directories(flash_attn_hygon_dlsym PUBLIC "${TORCH_DIR}/lib")
+    target_link_libraries(flash_attn_hygon_dlsym PUBLIC torch torch_hip c10 c10_hip dl)
+    # The wrapper references MhaKVCache::*_dispatcher() symbols (defined in
+    # libinfinicore). Don't link against libinfinicore here — that would create
+    # a cycle (libinfinicore PUBLIC-links us back). Instead allow unresolved
+    # symbols at link time; the dynamic loader resolves them at runtime when
+    # libinfinicore is loaded alongside.
+    set_target_properties(flash_attn_hygon_dlsym PROPERTIES
+        LINK_FLAGS "-Wl,--unresolved-symbols=ignore-all"
+    )
+
+    # libinfinicore's existing flash-attn TUs gate themselves out via
+    # ENABLE_FLASH_ATTN_DLSYM — define this on infinicore so the #if fires.
+    target_compile_definitions(infinicore PRIVATE ENABLE_FLASH_ATTN_DLSYM)
+
+    # libinfinicore PUBLIC-links the wrapper so loading libinfinicore (or _infinilm
+    # transitively) drags it in and its static graph-op registrations fire.
+    # Use --no-as-needed: ld defaults to dropping NEEDED entries when no symbols
+    # are referenced (we deliberately don't reference any — registrations fire
+    # via static initializers).
+    target_link_libraries(infinicore PUBLIC
+        "-Wl,--no-as-needed" flash_attn_hygon_dlsym "-Wl,--as-needed")
+endif()
+
+# ---- Flash-attention link-time build (NVIDIA / vllm fork) ----
 # When INFINIOPS_FLASH_ATTN_DIR points at a flash-attention checkout, build
-# libflash-attn-nvidia.so from its FA2 sources and enable ENABLE_FLASH_ATTN +
+# libflash-attn-<backend>.so from its FA2 sources and enable ENABLE_FLASH_ATTN +
 # ENABLE_ATEN inside libinfinicore so the flash backends compile in.
+#   - NVIDIA build: produces libflash-attn-nvidia.so from the vllm-project fork.
+#   - Hygon build:  produces libflash-attn-hygon.so. The Hygon flash-attention
+#                   source fork (e.g. das.opt1.dtk*, the same source that produced
+#                   `pip install flash_attn==2.8.3+das.opt1.dtk2604`) must be
+#                   passed via INFINIOPS_FLASH_ATTN_DIR.
 if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
     if(NOT EXISTS "${INFINIOPS_FLASH_ATTN_DIR}/csrc/flash_attn/flash_api.cpp")
         message(FATAL_ERROR "INFINIOPS_FLASH_ATTN_DIR='${INFINIOPS_FLASH_ATTN_DIR}' does not contain csrc/flash_attn/flash_api.cpp")
     endif()
     if(NOT EXISTS "${INFINIOPS_FLASH_ATTN_DIR}/csrc/cutlass/include/cutlass/cutlass.h")
         message(FATAL_ERROR "cutlass submodule missing under ${INFINIOPS_FLASH_ATTN_DIR}/csrc/cutlass; run 'git submodule update --init --recursive'")
+    endif()
+
+    # Pick the per-backend target name. Consumers (libinfinicore) link against
+    # whichever target gets built; the .so name is cosmetic. Both backends
+    # compile through the CUDA language path — Hygon uses DTK's nvcc shim.
+    if(INFINI_NV_BACKEND STREQUAL "HYGON")
+        set(_fa_target flash-attn-hygon)
+    else()
+        set(_fa_target flash-attn-nvidia)
     endif()
 
     # Locate PyTorch C++ (ATen) installation via Python.
@@ -227,7 +330,7 @@ if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
     if(NOT _torch_rc EQUAL 0 OR TORCH_DIR STREQUAL "")
         message(FATAL_ERROR "PyTorch not importable; flash-attn integration needs ATen headers (pip install torch).")
     endif()
-    message(STATUS "PyTorch dir: ${TORCH_DIR}")
+    message(STATUS "PyTorch dir: ${TORCH_DIR}  (flash-attn target: ${_fa_target})")
 
     # FA2 forward-only kernel set (skip backward + sparse).
     file(GLOB FA2_KERNEL_SRCS CONFIGURE_DEPENDS
@@ -235,18 +338,18 @@ if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
     )
     list(FILTER FA2_KERNEL_SRCS EXCLUDE REGEX "flash_fwd_sparse_")
 
-    add_library(flash-attn-nvidia SHARED
+    add_library(${_fa_target} SHARED
         "${INFINIOPS_FLASH_ATTN_DIR}/csrc/flash_attn/flash_api.cpp"
         ${FA2_KERNEL_SRCS}
     )
-    set_target_properties(flash-attn-nvidia PROPERTIES
-        CUDA_SEPARABLE_COMPILATION OFF
-    )
-    # FA2 only has sm_80–sm_90 kernels. Avoid CMake's "native" probe (mis-detects
-    # on hosts without a visible GPU at configure time).
+    set_target_properties(${_fa_target} PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+
     set(_fa_archs "${INFINIOPS_FLASH_ATTN_ARCHS}")
     if(NOT _fa_archs)
-        if(CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
+        if(INFINI_NV_BACKEND STREQUAL "HYGON")
+            # DTK's nvcc shim accepts a CUDA arch number; DCU exposes itself as cc 7.5.
+            set(_fa_archs "75")
+        elseif(CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
             set(_fa_archs "${CMAKE_CUDA_ARCHITECTURES}")
         else()
             # Single-arch default keeps the .so under ~200MB and compile under
@@ -254,8 +357,9 @@ if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
             set(_fa_archs "80")
         endif()
     endif()
-    set_target_properties(flash-attn-nvidia PROPERTIES CUDA_ARCHITECTURES "${_fa_archs}")
-    target_include_directories(flash-attn-nvidia PRIVATE
+    set_target_properties(${_fa_target} PROPERTIES CUDA_ARCHITECTURES "${_fa_archs}")
+
+    target_include_directories(${_fa_target} PRIVATE
         "${INFINIOPS_FLASH_ATTN_DIR}/csrc/flash_attn"
         "${INFINIOPS_FLASH_ATTN_DIR}/csrc/flash_attn/src"
         "${INFINIOPS_FLASH_ATTN_DIR}/csrc/common"
@@ -264,14 +368,14 @@ if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
         "${TORCH_DIR}/include/torch/csrc/api/include"
         "${Python3_INCLUDE_DIRS}"
     )
-    target_compile_definitions(flash-attn-nvidia PRIVATE
+    target_compile_definitions(${_fa_target} PRIVATE
         FLASHATTENTION_DISABLE_BACKWARD
         FLASHATTENTION_DISABLE_DROPOUT
         FLASHATTENTION_DISABLE_PYBIND
         CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1
         TORCH_API_INCLUDE_EXTENSION_H
     )
-    target_compile_options(flash-attn-nvidia PRIVATE
+    target_compile_options(${_fa_target} PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
@@ -279,8 +383,8 @@ if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-deprecated-declarations>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-unused-function>
     )
-    target_link_directories(flash-attn-nvidia PUBLIC "${TORCH_DIR}/lib")
-    target_link_libraries(flash-attn-nvidia PUBLIC torch torch_cuda c10 c10_cuda CUDA::cudart)
+    target_link_directories(${_fa_target} PUBLIC "${TORCH_DIR}/lib")
+    target_link_libraries(${_fa_target} PUBLIC torch torch_cuda c10 c10_cuda CUDA::cudart)
 
     # Tell libinfinicore to compile its flash-attn glue layers.
     target_compile_definitions(infinicore PRIVATE ENABLE_FLASH_ATTN ENABLE_ATEN)
@@ -289,7 +393,7 @@ if(INFINIOPS_FLASH_ATTN_DIR AND INFINIOPS_ENABLE_NVIDIA)
         "${TORCH_DIR}/include/torch/csrc/api/include"
         "${INFINIOPS_FLASH_ATTN_DIR}/csrc/flash_attn"
     )
-    target_link_libraries(infinicore PRIVATE flash-attn-nvidia)
+    target_link_libraries(infinicore PRIVATE ${_fa_target})
 endif()
 
 install(TARGETS infinicore LIBRARY DESTINATION lib)

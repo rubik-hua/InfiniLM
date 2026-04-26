@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-InfiniLM is an inference engine built on [InfiniCore](https://github.com/InfiniTensor/InfiniCore). It provides LLM inference across multiple hardware backends (CPU, NVIDIA, Cambricon, Ascend, MetaX, Moore, Iluvatar, Kunlun, Hygon, Ali/QY). The project has two layers: a C++ core library (`infinicore_infer`) and a Python package (`infinilm`) with pybind11 bindings.
+InfiniLM is an inference engine that bundles an inlined fork of [InfiniCore](https://github.com/InfiniTensor/InfiniCore). It provides LLM inference across multiple hardware backends (CPU, NVIDIA, Cambricon, Ascend, MetaX, Moore, Iluvatar, Kunlun, Hygon, Ali/QY). The repo composes four CMake subprojects — `runtime/` (`libinfinirt`), `ccl/` (`libinfiniccl`), `ops/` (`libinfinicore`), and a top-level pybind11 module `_infinilm` — plus the `infinilm` Python package.
 
 ## Prerequisites
 
-- **InfiniCore** must be compiled and installed first. The `INFINI_ROOT` env var (default `$HOME/.infini`) must point to the installation.
+- InfiniCore is **inlined** in this repo (subprojects under `runtime/`, `ccl/`, `ops/`); no separate InfiniCore install or `INFINI_ROOT` is needed for the new build path. `INFINI_ROOT` is only consulted by the legacy `scripts/libinfinicore_infer/` ctypes path.
 - Submodules required: `git submodule update --init --recursive` (pulls `third_party/spdlog` and `third_party/json`).
 - Python >= 3.10.
 
@@ -21,6 +21,8 @@ InfiniLM is an inference engine built on [InfiniCore](https://github.com/InfiniT
 
 ## Build Commands
 
+The canonical build is CMake, driven from `setup.py`. `xmake.lua` is still in the tree but is legacy — prefer CMake.
+
 ```bash
 # Legacy path: build/install infinicore_infer to $INFINI_ROOT
 xmake && xmake install
@@ -32,14 +34,71 @@ xmake f --use-classic-llama=true -cv   # classic LlamaForCausalLM path
 # Modern path: builds runtime/ccl/ops subprojects + _infinilm pybind module via CMake
 pip install -e .
 
+# Build C++ targets directly (without touching the Python package)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
 # Build-time env knobs (consumed by setup.py)
 INFINILM_BUILD_FLASH_ATTN=1 pip install -e .          # enable FlashAttention backend (auto-clones third_party/flash-attention)
-INFINILM_FLASH_ATTN_ARCHS=80 pip install -e .         # restrict CUDA archs (default 80;86;89;90)
+INFINILM_FLASH_ATTN_ARCHS=80 pip install -e .         # restrict CUDA archs (default 80;86;89;90; single arch shrinks .so ~4×)
+INFINILM_FLASH_ATTN_DIR=/abs/path pip install -e .    # use a pre-existing flash-attention checkout instead of cloning
 INFINILM_BUILD_TYPE=Debug pip install -e .            # Debug | Release | RelWithDebInfo
 INFINILM_BUILD_JOBS=8 pip install -e .                # parallel compile jobs (default nproc)
+INFINILM_ENABLE_HYGON=1 pip install -e .              # build for Hygon DCU (DTK/HIP); see below
 ```
 
 The CMake build also accepts `-DINFINILM_ENABLE_KV_CACHING=ON` and `-DINFINILM_USE_CLASSIC_LLAMA=ON` as the equivalents of the xmake flags above.
+
+### Hygon DCU build
+
+Hygon DCU uses the DTK toolchain (DTK 2604+, gfx906/gfx926/gfx928/gfx936/gfx938). DTK ships a complete CUDA-toolkit shim at `/opt/dtk/cuda/cuda-12/` (nvcc, cudart, cublas, cudnn, nccl-named `librccl`), so the build compiles the **same `.cu` sources** as NVIDIA via DTK's nvcc — only the `ENABLE_HYGON_API` define differs (which switches `infinirt::cuda` → `infinirt::hygon` and gates out FP8 / `cublasComputeType_t` paths the DCU can't handle).
+
+```bash
+source /opt/dtk/env.sh && source /opt/dtk/cuda/cuda-12/env.sh
+export LD_LIBRARY_PATH="$(python3 -c 'import torch,os; print(os.path.join(os.path.dirname(torch.__file__),"lib"))'):$LD_LIBRARY_PATH"
+INFINILM_ENABLE_HYGON=1 pip install -e . --no-build-isolation
+```
+
+Implementation notes:
+
+- The umbrella `INFINILM_ENABLE_HYGON=ON` flips `INFINIRT_ENABLE_NVIDIA` / `INFINICCL_ENABLE_NVIDIA` / `INFINIOPS_ENABLE_NVIDIA` off and the matching `_HYGON` options on (top-level `CMakeLists.txt`).
+- `CMAKE_CUDA_ARCHITECTURES=75` is the right value: DTK's nvcc translates `sm_75` to the full DCU set internally.
+- `CUDA_SEPARABLE_COMPILATION` is forced **OFF** under Hygon — DTK's device-link step drops gfx code from the final shared lib.
+- RCCL is found via `find_library(rccl)` against `/opt/dtk/lib`.
+- cuDNN works under DTK (libcudnn.so is shipped) so `INFINIOPS_ENABLE_CUDNN=ON` is fine.
+
+Status: **all paths green on `/root/models/9g_8b_thinking_llama` tp=1**
+
+| Configuration                    | Prefill   | Decode   |
+|----------------------------------|-----------|----------|
+| Eager static-cache               | 23 tok/s  | 28 tok/s |
+| Eager `--enable-paged-attn`      | 51 tok/s  | 38 tok/s |
+| Eager `--attn=flash-attn`        | 49 tok/s  | 38 tok/s |
+| Graph `--enable-graph` paged     | 250 tok/s | 40 tok/s |
+| Graph `--enable-graph` flash-attn| 256 tok/s | 40 tok/s |
+
+#### What it took beyond build wiring
+
+Paged-attention required these source edits (all share the existing NVIDIA `.cu` kernels, gated for Hygon):
+- Hygon entries in dispatch tables of `paged_attention/`, `paged_attention_prefill/`, `paged_caching/`, `embedding/` `operator.cc`.
+- `ENABLE_HYGON_API` added to `paged_attention_prefill_nvidia.cu`'s top `#if`.
+- `nvcuda::wmma` block in `paged_attention_prefill/cuda/kernel_v2.cuh` gated with `!defined(ENABLE_HYGON_API)`.
+- `default_prefill_kernel()` returns `"warp"` under Hygon (DCU has no Tensor Cores → wmma kernel is unavailable).
+- HYGON added to `embedding.cc` / `rmsnorm.cc` device whitelists.
+
+Flash-attn (`ops/src/infinicore/adaptor/flash_attn_hygon_dlsym.cc`):
+- Dlsym wrapper for `mha_fwd_kvcache` / `vllm_mha_varlen_fwd` / `paged_attention` from the system `flash_attn 2.8.3+das.opt1.dtk2604` wheel. Function-pointer types use `c10::optional` to match DTK ABI.
+- `python/infinilm/__init__.py` `RTLD_GLOBAL`-preloads `flash_attn_2_cuda*.so` so symbols are visible to `dlsym(RTLD_DEFAULT, …)`.
+- Decode path uses `paged_attention` (not `mha_fwd_kvcache`) — the latter calls `torch::empty` for `softmax_lse` per step which breaks HIP graph capture.
+- K/V layout: K permuted to `[NB, nkv, BS, hd]`, V transposed to `[NB, nkv, hd, BS]`, both into pre-allocated scratches in `plan()`.
+- `c10::hip::HIPStreamGuard` at the top of `run()` binds PyTorch's current stream to InfiniLM's stream so all ATen calls (including the dlsym'd FA kernels) participate in HIP graph capture.
+- Compiled as a separate shared lib with plain g++ + `__HIP_PLATFORM_AMD__` so it can pull `<c10/hip/…>` headers without colliding with libinfinicore's DTK CUDA-compat include path.
+- Lazy registration via explicit `infinicore_hygon_register_flash_attn()` called from `MhaKVCache` / `MultiheadAttentionVarlen` ctors — avoids static-init circular dep with libinfinicore.
+- **Two non-obvious fixes** (only visible after diagnostic prints — neither matched the handoff's predicted root causes):
+  1. `q.contiguous()` — q arrives as a non-contiguous slice of the fused QKV projection (`stride=[4608,128,1]` vs packed `[4096,128,1]`); DTK FA requires contiguous q.
+  2. Compute `max_seqlen_q/k` from tensor shapes (`q.size(0)`, `block_table.size(1) * k.size(2)`) instead of using the caller-supplied `max_position_embeddings_` (65536 for this model). DTK FA uses these for internal workspace sizing — oversized values → VMFault.
+
+Graph mode "just worked" once flash-attn worked. The handoff's Bug 2a (ATen `index_select_out` for embedding) doesn't apply because our embedding op already uses a native CUDA kernel via `op::embedding` (with Hygon dispatch). Bug 2b (HIPStreamGuard) was already wired in the flash-attn TU.
 
 ## Running Inference
 
@@ -129,4 +188,4 @@ New work should target the `examples/` + `python/infinilm/` path; touch `scripts
 - C++17 standard, GCC toolchain
 - Warnings treated as errors (`-Wall -Werror`)
 - Namespace: `infinilm` (sub-namespaces: `engine`, `cache`, `config`, `backends`)
-- Dependencies: InfiniCore (`infiniop`, `infinirt`, `infiniccl`), spdlog, nlohmann/json
+- Dependencies: inlined `infinicore` (from `ops/`), `infinirt` (from `runtime/`), `infiniccl` (from `ccl/`); spdlog and nlohmann/json under `third_party/`
