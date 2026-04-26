@@ -215,6 +215,9 @@ infiniStatus_t Descriptor::calculate(
     // Check for kernel launch errors
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
+        fprintf(stderr, "[infiniop embedding] cuda err=%d (%s) num_idx=%zu emb_dim=%zu vocab=%zu in_dtype=%d w_dtype=%d block=%zu grid=%zu\n",
+                (int)err, cudaGetErrorString(err), _num_indices, _embedding_dim, _vocab_size,
+                (int)_input_dtype, (int)_weight_dtype, block_size, grid_size);
         return INFINI_STATUS_INTERNAL_ERROR;
     }
 

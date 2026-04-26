@@ -53,18 +53,31 @@ if(INFINIOPS_ENABLE_CPU)
     list(APPEND INFINIOP_DEFS ENABLE_CPU_API)
 endif()
 
+set(INFINI_NV_BACKEND "NVIDIA" CACHE STRING "Which CUDA-compatible backend the nvidia/ sources implement")
+
 if(INFINIOPS_ENABLE_NVIDIA)
     enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     file(GLOB _nv_dev_src  CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infiniop/devices/nvidia/*.cu")
     file(GLOB _nv_ops_src1 CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infiniop/ops/*/nvidia/*.cu")
     file(GLOB _nv_ops_src2 CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infiniop/ops/*/*/nvidia/*.cu")
     list(APPEND INFINIOP_NVIDIA_CU_SRC ${_nv_dev_src} ${_nv_ops_src1} ${_nv_ops_src2})
-    list(APPEND INFINIOP_DEFS ENABLE_NVIDIA_API)
+    # Some ops ship a backend-specific override under <op>/<backend>/. Pick those
+    # up too when INFINI_NV_BACKEND is something other than NVIDIA.
+    string(TOLOWER "${INFINI_NV_BACKEND}" _nv_backend_lc)
+    if(NOT _nv_backend_lc STREQUAL "nvidia")
+        file(GLOB _nv_ops_extra1 CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infiniop/ops/*/${_nv_backend_lc}/*.cu")
+        file(GLOB _nv_ops_extra2 CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infiniop/ops/*/*/${_nv_backend_lc}/*.cu")
+        list(APPEND INFINIOP_NVIDIA_CU_SRC ${_nv_ops_extra1} ${_nv_ops_extra2})
+    endif()
+    list(APPEND INFINIOP_DEFS "ENABLE_${INFINI_NV_BACKEND}_API")
     find_package(CUDAToolkit REQUIRED)
     list(APPEND INFINIOP_LINK_LIBS CUDA::cudart CUDA::cublas)
     if(INFINIOPS_ENABLE_CUDNN)
         # Debian/Ubuntu ship cuDNN headers under /usr/include/x86_64-linux-gnu;
-        # NVIDIA tarball under $CUDNN_ROOT/include.
+        # NVIDIA tarball under $CUDNN_ROOT/include; Iluvatar Corex under
+        # $CUDNN_ROOT/include with libs in lib64.
         find_path(CUDNN_INCLUDE_DIR cudnn.h
             HINTS
                 $ENV{CUDNN_ROOT} $ENV{CUDNN_HOME} $ENV{CUDNN_PATH}
@@ -74,7 +87,17 @@ if(INFINIOPS_ENABLE_NVIDIA)
         if(NOT CUDNN_INCLUDE_DIR)
             message(FATAL_ERROR "cudnn.h not found. Install cuDNN or set CUDNN_ROOT.")
         endif()
-        list(APPEND INFINIOP_LINK_LIBS cudnn)
+        find_library(CUDNN_LIB cudnn
+            HINTS
+                $ENV{CUDNN_ROOT} $ENV{CUDNN_HOME} $ENV{CUDNN_PATH}
+                /usr/local/cuda
+            PATH_SUFFIXES lib64 lib lib/x86_64-linux-gnu
+        )
+        if(CUDNN_LIB)
+            list(APPEND INFINIOP_LINK_LIBS "${CUDNN_LIB}")
+        else()
+            list(APPEND INFINIOP_LINK_LIBS cudnn)
+        endif()
         list(APPEND INFINIOP_DEFS ENABLE_CUDNN_API)
     endif()
 endif()
@@ -154,13 +177,23 @@ if(INFINIOPS_ENABLE_NVIDIA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
         set_target_properties(infinicore PROPERTIES CUDA_ARCHITECTURES native)
     endif()
-    target_compile_options(infinicore PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-deprecated-declarations>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-unused-function>
-    )
+    if(CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(infinicore PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-fPIC>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unknown-cuda-version>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-command-line-argument>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-declarations>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-function>
+        )
+    else()
+        target_compile_options(infinicore PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-deprecated-declarations>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-unused-function>
+        )
+    endif()
 endif()
 
 # libinfinicore calls infiniccl symbols (distributed allreduce).

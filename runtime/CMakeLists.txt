@@ -8,6 +8,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(INFINIRT_ENABLE_CPU    "Enable CPU backend"    ON)
 option(INFINIRT_ENABLE_NVIDIA "Enable NVIDIA backend" ON)
 option(INFINIRT_ENABLE_OMP    "Enable OpenMP"         ON)
+# CUDA-API-compatible backends share the cuda/*.cu sources but pick a different
+# infinirt::<ns> namespace via ENABLE_<X>_API. Set INFINI_NV_BACKEND to one of
+# NVIDIA / ILUVATAR / QY / HYGON / ALI to override.
+set(INFINI_NV_BACKEND "NVIDIA" CACHE STRING "Which CUDA-compatible backend the cuda/ sources implement")
 
 set(INFINILM_TP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party" CACHE PATH "third_party root")
 set(SPDLOG_INCLUDE "${INFINILM_TP_ROOT}/spdlog/include")
@@ -29,9 +33,11 @@ endif()
 
 if(INFINIRT_ENABLE_NVIDIA)
     enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     file(GLOB _cu_src CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infinirt/cuda/*.cu")
     list(APPEND INFINIRT_BACKEND_CU_SRC ${_cu_src})
-    list(APPEND INFINIRT_DEFS ENABLE_NVIDIA_API)
+    list(APPEND INFINIRT_DEFS "ENABLE_${INFINI_NV_BACKEND}_API")
     find_package(CUDAToolkit REQUIRED)
     list(APPEND INFINIRT_LINK_LIBS CUDA::cudart)
 endif()
@@ -63,11 +69,20 @@ if(INFINIRT_ENABLE_NVIDIA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
         set_target_properties(infinirt PROPERTIES CUDA_ARCHITECTURES native)
     endif()
-    target_compile_options(infinirt PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
-    )
+    if(CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
+        # Iluvatar Corex uses Clang-CUDA; the nvcc-only flags below are unknown to it.
+        target_compile_options(infinirt PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-fPIC>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unknown-cuda-version>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-command-line-argument>
+        )
+    else()
+        target_compile_options(infinirt PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
+        )
+    endif()
 endif()
 
 if(INFINIRT_ENABLE_OMP)

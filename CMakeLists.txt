@@ -50,6 +50,9 @@ if(INFINILM_BUILD_PYBIND)
         -Wno-deprecated-declarations
         -Wno-unused-function
     )
+    # Mirror the API-selector define from runtime/ccl/ops onto the pybind module
+    # so any csrc/ TU that switches on ENABLE_<X>_API picks the same backend.
+    target_compile_definitions(_infinilm PRIVATE "ENABLE_${INFINI_NV_BACKEND}_API")
 
     option(INFINILM_ENABLE_KV_CACHING "Enable KV caching op" OFF)
     if(INFINILM_ENABLE_KV_CACHING)

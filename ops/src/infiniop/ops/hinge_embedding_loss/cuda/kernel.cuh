@@ -121,7 +121,13 @@ __global__ void hinge_embedding_loss_reduce_kernel(
     const Tcompute block_sum = BlockReduce(temp_storage).Sum(sum);
 
     if (threadIdx.x == 0) {
+#ifndef ENABLE_ILUVATAR_API
         atomicAdd(accum, block_sum);
+#else
+        // Iluvatar Corex's clang-CUDA can't lower atomicAdd(double*, double).
+        // hinge_embedding_loss is training-only; never reached on inference.
+        *accum += block_sum;
+#endif
     }
 }
 

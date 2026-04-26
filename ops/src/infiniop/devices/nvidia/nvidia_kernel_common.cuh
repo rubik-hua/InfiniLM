@@ -9,7 +9,8 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#ifndef ENABLE_HYGON_API
+// Iluvatar Corex's CUDA 10.2-equivalent toolkit and Hygon DCU don't ship cuda_fp8.h.
+#if !defined(ENABLE_HYGON_API) && !defined(ENABLE_ILUVATAR_API)
 #include <cuda_fp8.h>
 #endif
 
@@ -29,7 +30,14 @@ using cuda_bfloat162 = __nv_bfloat162;
 #else
 using cuda_bfloat16 = nv_bfloat16;
 using cuda_bfloat162 = nv_bfloat162;
+#ifdef ENABLE_ILUVATAR_API
+// Iluvatar Corex has no FP8 support; alias to a single-byte stub so templates
+// that reference cuda_fp8_e4m3 still instantiate (the FP8 dispatch branch is
+// never reached for INFINI_DTYPE_FP8E4M3 on this backend).
+using cuda_fp8_e4m3 = unsigned char;
+#else
 using cuda_fp8_e4m3 = __nv_fp8_e4m3;
+#endif
 #endif
 
 namespace device::nvidia {

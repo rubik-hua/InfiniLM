@@ -126,7 +126,13 @@ __global__ void gaussian_nll_loss_reduce_kernel(
     Tcompute block_sum = BlockReduce(temp_storage).Sum(sum);
 
     if (threadIdx.x == 0) {
+#ifndef ENABLE_ILUVATAR_API
         atomicAdd(output, block_sum);
+#else
+        // Iluvatar Corex's clang-CUDA can't lower atomicAdd(double*, double).
+        // gaussian_nll_loss is a training-side op; never reached on inference.
+        *output += block_sum;
+#endif
     }
 }
 
@@ -204,7 +210,11 @@ __global__ void gaussian_nll_loss_reduce_kernel(
     const Tcompute block_sum = BlockReduce(temp_storage).Sum(sum);
 
     if (threadIdx.x == 0) {
+#ifndef ENABLE_ILUVATAR_API
         atomicAdd(reinterpret_cast<Tcompute *>(output), block_sum);
+#else
+        *reinterpret_cast<Tcompute *>(output) += block_sum;
+#endif
     }
 }
 

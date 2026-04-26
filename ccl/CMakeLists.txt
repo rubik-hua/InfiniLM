@@ -21,19 +21,30 @@ set(INFINICCL_CU_SRC "")
 set(INFINICCL_DEFS "")
 set(INFINICCL_LINK_LIBS "")
 
+set(INFINI_NV_BACKEND "NVIDIA" CACHE STRING "Which CUDA-compatible backend the cuda/ sources implement")
+
 if(INFINICCL_ENABLE_NVIDIA)
     enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     file(GLOB _cu_src CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/infiniccl/cuda/*.cu")
     list(APPEND INFINICCL_CU_SRC ${_cu_src})
-    list(APPEND INFINICCL_DEFS ENABLE_NVIDIA_API ENABLE_CCL)
+    list(APPEND INFINICCL_DEFS "ENABLE_${INFINI_NV_BACKEND}_API" ENABLE_CCL)
 
     find_package(CUDAToolkit REQUIRED)
     list(APPEND INFINICCL_LINK_LIBS CUDA::cudart)
 
     # NCCL: use NCCL_ROOT env var if available, else rely on system paths.
+    # NCCL_ROOT may also point to a toolkit root with libs under lib64 (Iluvatar Corex).
     set(_nccl_root "$ENV{NCCL_ROOT}")
     if(_nccl_root)
-        list(APPEND INFINICCL_LINK_LIBS "${_nccl_root}/lib/libnccl.so")
+        if(EXISTS "${_nccl_root}/lib/libnccl.so")
+            list(APPEND INFINICCL_LINK_LIBS "${_nccl_root}/lib/libnccl.so")
+        elseif(EXISTS "${_nccl_root}/lib64/libnccl.so")
+            list(APPEND INFINICCL_LINK_LIBS "${_nccl_root}/lib64/libnccl.so")
+        else()
+            list(APPEND INFINICCL_LINK_LIBS nccl)
+        endif()
         set(NCCL_INCLUDE "${_nccl_root}/include")
     else()
         list(APPEND INFINICCL_LINK_LIBS nccl)
@@ -61,11 +72,19 @@ if(INFINICCL_ENABLE_NVIDIA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
         set_target_properties(infiniccl PROPERTIES CUDA_ARCHITECTURES native)
     endif()
-    target_compile_options(infiniccl PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
-    )
+    if(CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(infiniccl PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-fPIC>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unknown-cuda-version>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Wno-unused-command-line-argument>
+        )
+    else()
+        target_compile_options(infiniccl PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fPIC>
+        )
+    endif()
 endif()
 
 target_link_libraries(infiniccl PRIVATE infinirt ${INFINICCL_LINK_LIBS})
