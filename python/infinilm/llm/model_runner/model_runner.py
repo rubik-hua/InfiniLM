@@ -153,6 +153,11 @@ class ModelRunner:
         )
 
     def _model_forward(self, scheduler_output):
+        print(
+            " ***************************** > _model_forward",
+            scheduler_output,
+            scheduler_output.is_prefill,
+        )
         # Build model inputs
         model_input_dict = scheduler_output.build_model_inputs(
             self.config.temperature, self.config.top_p, self.config.top_k

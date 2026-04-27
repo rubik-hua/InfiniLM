@@ -111,6 +111,7 @@ class MooncakeConnector(KVConnectorBase):
     def get_num_new_matched_tokens(
         self, request: InferenceRequest, num_computed_tokens: int
     ) -> tuple[int, bool]:
+        print("--------------------------------> get_num_new_matched_tokens", request)
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -123,6 +124,8 @@ class MooncakeConnector(KVConnectorBase):
         num_external_tokens: int,
         block_size: Optional[int] = None,
     ) -> None:
+        print("--------------------------------> update_state_after_alloc", request)
+
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
             request, block_ids, num_external_tokens, block_size
@@ -132,6 +135,9 @@ class MooncakeConnector(KVConnectorBase):
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata | None:
+        print(
+            "--------------------------------> build_connector_meta", scheduler_output
+        )
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
@@ -141,6 +147,7 @@ class MooncakeConnector(KVConnectorBase):
         block_ids: list[int],
         block_size: Optional[int] = None,
     ) -> tuple[bool, dict[str, Any] | None]:
+        print("--------------------------------> request_finished", request)
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids, block_size)
 
@@ -152,6 +159,7 @@ class MooncakeConnector(KVConnectorBase):
         self,
         **kwargs,
     ) -> None:
+        print("--------------------------------> start_load_kv", kwargs)
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -161,5 +169,7 @@ class MooncakeConnector(KVConnectorBase):
         finished_req_ids: set[str],  # noqa: ARG002
     ) -> tuple[set[str] | None, set[str] | None]:
         """Return finished receive and send request id sets, if any."""
+
+        print("--------------------------------> get_finished", finished_req_ids)
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()

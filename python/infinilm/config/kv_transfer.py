@@ -42,7 +42,9 @@ class KVTransferConfig:
             raise ValueError("Please specify kv_role when kv_connector is set.")
 
         if self.engine_id is None:
-            self.engine_id = f"{self.kv_role}_" + str(uuid.uuid4())
+            id_str = str(uuid.uuid4())
+            id_str = "0"
+            self.engine_id = f"{self.kv_role}_" + id_str
 
         # TODO : force use tcp for mooncake
-        os.environ["MC_FORCE_TCP"] = True
+        os.environ["MC_FORCE_TCP"] = "true"

@@ -13,6 +13,9 @@ from infinilm.llm.cache_manager import BlockManager
 logger = logging.getLogger(__name__)
 
 
+waiting_for_remote_kvs_requests: List[InferenceRequest] = []
+
+
 class SchedulerOutput:
     """Scheduler output containing scheduled requests and execution phase info."""
 
@@ -153,7 +156,32 @@ class Scheduler:
         if request is not None:
             request.status = RequestStatus.WAITING
 
+            if True == True:
+                if self.kv_connector is not None:
+                    kv_transfer_config = self.kv_connector.kv_transfer_config
+                    if kv_transfer_config.kv_role == "kv_producer":  # 是P节点
+                        request.kv_transfer_params = {
+                            "do_remote_decode": True,
+                            "do_remote_prefill": False,
+                            "transfer_id": f"xfer-{request.request_id}",
+                        }
+
+                    if kv_transfer_config.kv_role == "kv_consumer":  # 是D节点
+                        request.request_id = "cmpl-0"
+                        remote_engine_id = "kv_producer_0"
+                        request.kv_transfer_params = {
+                            "do_remote_decode": False,
+                            "do_remote_prefill": True,
+                            "transfer_id": f"xfer-{request.request_id}",
+                            "remote_bootstrap_addr": "http://0.0.0.0:8998",
+                            "remote_engine_id": remote_engine_id,
+                        }
+
             self.waiting_queue.sync_q.put(request)
+
+    def get_remote_for_waiting_kv_requests(self):
+        global waiting_for_remote_kvs_requests
+        return waiting_for_remote_kvs_requests
 
     def schedule(self) -> Optional[SchedulerOutput]:
         """Schedule and return batch of requests to execute."""
@@ -163,7 +191,7 @@ class Scheduler:
         # Process Waiting queue (prefill phase)
         while len(scheduled_requests) < self.max_batch_size:
             try:
-                req = self.waiting_queue.sync_q.get_nowait()
+                req: InferenceRequest = self.waiting_queue.sync_q.get_nowait()
             except queue.Empty:
                 break
             # Skip requests that were already finished (e.g., timed out/canceled while waiting)
@@ -187,10 +215,48 @@ class Scheduler:
                 if not self.cache_manager.try_free_blocks(num_required_blocks):
                     raise RuntimeError("No available cache blocks for new request")
 
+            if True == True:
+                if self.kv_connector is not None:
+                    print(
+                        f"req.request_id: {req.request_id}, num_cached_tokens: {req.num_cached_tokens}"
+                    )
+                    num_new_local_computed_tokens = 0
+                    ext_tokens, load_kv_async = (
+                        self.kv_connector.get_num_new_matched_tokens(
+                            req, num_new_local_computed_tokens
+                        )
+                    )
+                    print(f"ext_tokens: {ext_tokens}, load_kv_async: {load_kv_async}")
+
             # Allocate blocks with automatic prefix caching support
             req.block_table, req.slot_mapping, req.num_cached_tokens = (
                 self.cache_manager.allocate_blocks(req_tokens, req.block_table)
             )
+
+            if True == True:
+                if (
+                    self.kv_connector.kv_transfer_config.kv_role == "kv_producer"
+                ):  # 是P节点
+                    if self.kv_connector is not None:
+                        num_external_computed_tokens = 0
+                        self.kv_connector.update_state_after_alloc(
+                            req,
+                            [],
+                            num_external_computed_tokens,
+                            block_size=self.block_size,
+                        )
+
+                if (
+                    self.kv_connector.kv_transfer_config.kv_role == "kv_consumer"
+                ):  # 是D节点
+                    if self.kv_connector is not None:
+                        num_external_computed_tokens = ext_tokens
+                        self.kv_connector.update_state_after_alloc(
+                            req,
+                            [0],
+                            num_external_computed_tokens,
+                            block_size=self.block_size,
+                        )
 
             req.num_blocks = len(req.block_table)
             req.status = RequestStatus.RUNNING
@@ -201,6 +267,30 @@ class Scheduler:
             is_prefill = True
 
             connector_metadata = None
+            if True == True:
+                if self.kv_connector is not None:
+                    if (
+                        self.kv_connector.kv_transfer_config.kv_role
+                        == "kv_producer"  # 是P节点
+                    ):
+                        connector_metadata = self.kv_connector.build_connector_meta(
+                            "scheduler_output"
+                        )
+                        print(f"connector_metadata: {connector_metadata}")
+
+                    if (
+                        self.kv_connector.kv_transfer_config.kv_role
+                        == "kv_consumer"  # 是D节点
+                    ):
+                        connector_metadata = self.kv_connector.build_connector_meta(
+                            "scheduler_output"
+                        )
+                        print(f"connector_metadata: {connector_metadata}")
+
+                        ## 添加到 waiting_for_remote中
+                        waiting_for_remote_kvs_requests.append(scheduled_requests[0])
+
+                        scheduled_requests = []
 
             return SchedulerOutput(
                 scheduled_requests=scheduled_requests,
@@ -211,7 +301,7 @@ class Scheduler:
         # Process Running queue (decode phase)
         while len(scheduled_requests) < self.max_batch_size:
             try:
-                req = self.running_queue.sync_q.get_nowait()
+                req: InferenceRequest = self.running_queue.sync_q.get_nowait()
             except queue.Empty:
                 break
             # Skip requests that were already finished (e.g., timed out/canceled while running)
@@ -233,11 +323,25 @@ class Scheduler:
                 raise RuntimeError("No available cache blocks for new token") from e
 
         # Return decode batch if any running requests were scheduled
-        if scheduled_requests:
+        # if scheduled_requests:
+        if True:
             is_prefill = False
+
+            if True:
+                connector_meta = None
+                if self.kv_connector is not None:
+                    if (
+                        self.kv_connector.kv_transfer_config.kv_role
+                        == "kv_consumer"  # 是D节点
+                    ):
+                        connector_meta = self.kv_connector.build_connector_meta(
+                            "scheduler_output"
+                        )
+
             return SchedulerOutput(
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
+                kv_connector_metadata=connector_meta,
             )
 
         return None

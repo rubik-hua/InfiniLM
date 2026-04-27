@@ -114,15 +114,15 @@ class Test:
 
     def transfer_test(self):
         print("===========> transfer_test")  # tcp://127.0.0.1: cmpl- tcp://127.0.0.1:
-        worker_addr = "tcp://127.0.0.1:38591"  # tcp:cmpl-
+        worker_addr = "tcp://127.0.0.1:36377"  # ttcp://127tcp://127.0.0.1:
         metadata = MooncakeXferMetadata(
             remote_hostname="127.0.0.1",
             remote_port=self.rpc_port,
             remote_tp_size=1,
             remote_tp_rank=0,
             req_blocks={
-                "cmpl-18da018aed614ec998c08208c794bcd8": (
-                    "xfer-cmpl-18da018aed614ec998c08208c794bcd8",
+                "cmpl-0": (
+                    "xfer-cmpl-0",
                     [0],
                 )
             },

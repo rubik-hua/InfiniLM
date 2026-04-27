@@ -76,6 +76,13 @@ class LLMEngine:
 
         # prefill separation
         self.kv_connector = None
+        if True == True:
+            if config.kv_transfer_config is not None:
+                self.kv_connector = create_kv_transfer(
+                    role=KVConnectorRole.SCHEDULER,
+                    kv_transfer_config=config.kv_transfer_config,
+                )
+                self.scheduler.set_kv_connector(self.kv_connector)
 
         logger.info(
             f"LLMEngine initialized with model at {config.model_path} "
@@ -141,8 +148,11 @@ class LLMEngine:
             - pending: Pending streaming outputs as (async_queue, TokenOutput) pairs.
         """
         # Schedule requests
-        scheduler_output = self.scheduler.schedule()
-        if scheduler_output is None or not scheduler_output.scheduled_requests:
+        scheduler_output: SchedulerOutput = self.scheduler.schedule()
+        if scheduler_output is None or (
+            scheduler_output.num_requests == 0
+            and scheduler_output.kv_connector_metadata is None
+        ):
             return [], []
 
         # Execute model
@@ -155,6 +165,86 @@ class LLMEngine:
             scheduler_output.scheduled_requests,
             sampled_tokens_list,
         )
+
+        if True == True:
+            if self.kv_connector is not None:
+                if self.config.kv_transfer_config.kv_role == "kv_producer":
+                    for req in scheduler_output.scheduled_requests:
+                        self.kv_connector.request_finished(
+                            req,
+                            block_ids=[0],
+                            block_size=self.config.block_size,
+                        )
+
+                    time.sleep(1)
+                    connector_meta = self.kv_connector.build_connector_meta(
+                        "scheduler_output"
+                    )
+
+                    from infinilm.llm.scheduler import SchedulerOutput
+
+                    scheduler_output_empty = SchedulerOutput([], False, connector_meta)
+
+                    print(
+                        "----------> scheduler_output_empty  ",
+                        scheduler_output_empty.kv_connector_metadata,
+                    )
+                    model_runner_output_empty = self.model_runner.execute_model(
+                        scheduler_output_empty
+                    )
+
+                if self.config.kv_transfer_config.kv_role == "kv_consumer":
+                    print(
+                        " xxxxxxxxxxxx --------------------------------> ",
+                        runner_output,
+                    )
+                    for req in scheduler_output.scheduled_requests:
+                        self.kv_connector.request_finished(
+                            req,
+                            block_ids=[0],
+                            block_size=self.config.block_size,
+                        )
+
+                    if runner_output.kv_connector_output.finished_recving is not None:
+                        for (
+                            finished_request_id
+                        ) in runner_output.kv_connector_output.finished_recving:
+                            print(
+                                " xxxxxxxxxxxx --------------------------------> ",
+                                runner_output.kv_connector_output.finished_recving,
+                                self.scheduler.get_remote_for_waiting_kv_requests(),
+                            )
+
+                            for (
+                                request
+                            ) in self.scheduler.get_remote_for_waiting_kv_requests():
+                                if request.request_id == finished_request_id:
+                                    print(
+                                        " xxxxxxxxxxxx --------------------------------> ",
+                                        request.request_id,
+                                        " found in remote_for_waiting_requests, has put back to running queue",
+                                    )
+
+                                    if True:
+                                        print(request)
+                                        request.generated_token_ids = [151667]
+                                        request.generated_text = "<think>"
+                                        request.is_prefill = False
+                                        request._stream_last_yielded_length = 7
+                                        request._pending_token_offset = 1
+
+                                    self.scheduler.running_queue.sync_q.put(request)
+                                    time.sleep(0.5)
+                                    self.scheduler.get_remote_for_waiting_kv_requests().remove(
+                                        request
+                                    )
+                                    break
+                                else:
+                                    print(
+                                        " xxxxxxxxxxxx --------------------------------> ",
+                                        finished_request_id,
+                                        " not found in remote_for_waiting_requests",
+                                    )
 
         return scheduler_output.scheduled_requests, pending
 

@@ -728,6 +728,11 @@ class MooncakeConnectorWorker:
                 while True:
                     ret_msg = await sock.recv()
                     response = self._xfer_resp_decoder.decode(ret_msg)
+                    print(
+                        "==========================================>  response from prefill ",
+                        response,
+                    )
+
                     if response.status == MooncakeXferResponseStatus.ERROR:
                         logger.error(
                             "Error happens during transferring kvcache for %s: %s",

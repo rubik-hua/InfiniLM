@@ -228,7 +228,10 @@ class InferenceServer:
             data["messages"] = self._normalize_messages(data.get("messages", []))
 
             stream = data.get("stream", False)
-            request_id = f"cmpl-{uuid.uuid4().hex}"
+
+            id_temp = uuid.uuid4().hex
+            id_temp = 0
+            request_id = f"cmpl-{id_temp}"
 
             if stream:
                 return StreamingResponse(
