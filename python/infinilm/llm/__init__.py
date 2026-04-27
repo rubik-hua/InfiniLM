@@ -11,12 +11,8 @@ from infinilm.llm.request import (
     TokenOutput,
     InferenceRequest,
 )
-from infinilm.llm.llm import (
-    LLM,
-    LLMEngine,
-    AsyncLLMEngine,
-    EngineConfig,
-)
+from infinilm.llm.engine_config import EngineConfig
+from infinilm.llm.llm import LLM, LLMEngine, AsyncLLMEngine
 from infinilm.llm.scheduler import Scheduler, SchedulerOutput
 from infinilm.llm.static_scheduler import StaticScheduler, StaticSchedulerOutput
 from infinilm.llm.cache_manager import BlockManager, Block

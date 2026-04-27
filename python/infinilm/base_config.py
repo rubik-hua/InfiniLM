@@ -44,7 +44,6 @@ class BaseConfig:
     """InfiniLM Unified Config - Command line argument parser"""
 
     def __init__(self):
-
         self.parser = argparse.ArgumentParser(description="InfiniLM Unified Config")
         self._add_common_args()
         self.args, self.extra = self.parser.parse_known_args()
@@ -102,6 +101,8 @@ class BaseConfig:
         self.port = self.args.port
         self.endpoint = self.args.endpoint
         self.ignore_eos = self.args.ignore_eos
+        # PD separation (KV transfer)
+        self.kv_transfer_config = self.args.kv_transfer_config
 
         # Multimodal parameters
         self.image = self.args.image
@@ -272,6 +273,19 @@ class BaseConfig:
             type=str,
             default=None,
             help="image path for multimodal models",
+        )
+
+        # ---- PD separation arguments ----
+        self.parser.add_argument(
+            "--kv-transfer-config",
+            type=str,
+            default=None,
+            help=(
+                "JSON object for KVTransferConfig. Allowed keys only: "
+                "kv_connector, engine_id, kv_role, kv_connector_extra_config (omit any for defaults). "
+                "Example: "
+                '\'{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}\''
+            ),
         )
 
     def get_device_str(self, device):
