@@ -54,10 +54,13 @@ The CMake build also accepts `-DINFINILM_ENABLE_KV_CACHING=ON` and `-DINFINILM_U
 Hygon DCU uses the DTK toolchain (DTK 2604+, gfx906/gfx926/gfx928/gfx936/gfx938). DTK ships a complete CUDA-toolkit shim at `/opt/dtk/cuda/cuda-12/` (nvcc, cudart, cublas, cudnn, nccl-named `librccl`), so the build compiles the **same `.cu` sources** as NVIDIA via DTK's nvcc — only the `ENABLE_HYGON_API` define differs (which switches `infinirt::cuda` → `infinirt::hygon` and gates out FP8 / `cublasComputeType_t` paths the DCU can't handle).
 
 ```bash
-source /opt/dtk/env.sh && source /opt/dtk/cuda/cuda-12/env.sh
-export LD_LIBRARY_PATH="$(python3 -c 'import torch,os; print(os.path.join(os.path.dirname(torch.__file__),"lib"))'):$LD_LIBRARY_PATH"
 INFINILM_ENABLE_HYGON=1 pip install -e . --no-build-isolation
 ```
+
+`setup.py` auto-sources `/opt/dtk/env.sh` + `/opt/dtk/cuda/cuda-12/env.sh` when
+`INFINILM_ENABLE_HYGON=1` is set (override the path via `INFINI_HYGON_DTK_ROOT`).
+The runtime libtorch dependency is satisfied by `import torch` at the top of
+`python/infinilm/__init__.py` — no manual `LD_LIBRARY_PATH` needed.
 
 Implementation notes:
 
@@ -67,15 +70,23 @@ Implementation notes:
 - RCCL is found via `find_library(rccl)` against `/opt/dtk/lib`.
 - cuDNN works under DTK (libcudnn.so is shipped) so `INFINIOPS_ENABLE_CUDNN=ON` is fine.
 
-Status: **all paths green on `/root/models/9g_8b_thinking_llama` tp=1**
+Status: **all paths green on `/root/models/9g_8b_thinking_llama` tp=1, with `--block-size 64`**
 
-| Configuration                    | Prefill   | Decode   |
-|----------------------------------|-----------|----------|
-| Eager static-cache               | 23 tok/s  | 28 tok/s |
-| Eager `--enable-paged-attn`      | 51 tok/s  | 38 tok/s |
-| Eager `--attn=flash-attn`        | 49 tok/s  | 38 tok/s |
-| Graph `--enable-graph` paged     | 250 tok/s | 40 tok/s |
-| Graph `--enable-graph` flash-attn| 256 tok/s | 40 tok/s |
+| Configuration                    | Prefill    | Decode     |
+|----------------------------------|------------|------------|
+| Eager `--enable-paged-attn`      | 67 tok/s   | 55.6 tok/s |
+| Eager `--attn=flash-attn`        | 63 tok/s   | 53.1 tok/s |
+| Graph `--enable-graph` paged     | 233 tok/s  | 56.9 tok/s |
+| Graph `--enable-graph` flash-attn| 236 tok/s  | 56.5 tok/s |
+
+**`--block-size 64` is required for `--attn=flash-attn` correctness on gfx936.** The DTK
+fork's `paged_attention` kernel silently half-writes output (every-other bf16 slot stays
+at zero) for any other block size — no TORCH_CHECK, just garble. The companion symbol
+`vllm_mha_fwd_kvcache` does enforce this via `TORCH_CHECK(block_size % 64 == 0, "Paged
+KV cache block size must be divisible by 64 at gfx936 platform")`. Default block_size=256
+(used by `--enable-paged-attn` alone, no FA) is fine for the handwritten `op::paged_attention_`
+path but produces garble for the dlsym'd FA path. Setting `--block-size 64` also gives a
++35% decode boost for both paths (42 → 57 tok/s) since the kernel is tuned for it.
 
 #### What it took beyond build wiring
 
@@ -94,9 +105,10 @@ Flash-attn (`ops/src/infinicore/adaptor/flash_attn_hygon_dlsym.cc`):
 - `c10::hip::HIPStreamGuard` at the top of `run()` binds PyTorch's current stream to InfiniLM's stream so all ATen calls (including the dlsym'd FA kernels) participate in HIP graph capture.
 - Compiled as a separate shared lib with plain g++ + `__HIP_PLATFORM_AMD__` so it can pull `<c10/hip/…>` headers without colliding with libinfinicore's DTK CUDA-compat include path.
 - Lazy registration via explicit `infinicore_hygon_register_flash_attn()` called from `MhaKVCache` / `MultiheadAttentionVarlen` ctors — avoids static-init circular dep with libinfinicore.
-- **Two non-obvious fixes** (only visible after diagnostic prints — neither matched the handoff's predicted root causes):
+- **Three non-obvious fixes** (only visible after diagnostic prints — neither matched the handoff's predicted root causes):
   1. `q.contiguous()` — q arrives as a non-contiguous slice of the fused QKV projection (`stride=[4608,128,1]` vs packed `[4096,128,1]`); DTK FA requires contiguous q.
   2. Compute `max_seqlen_q/k` from tensor shapes (`q.size(0)`, `block_table.size(1) * k.size(2)`) instead of using the caller-supplied `max_position_embeddings_` (65536 for this model). DTK FA uses these for internal workspace sizing — oversized values → VMFault.
+  3. **Caller must use `--block-size 64`** — DTK fork's `paged_attention` kernel silently half-writes output for any other block size (default 256 produces every-other-zero bf16 pattern → garbled tokens from step 1). No runtime check fires. Sister symbol `vllm_mha_fwd_kvcache` enforces this via TORCH_CHECK; `paged_attention` does not. Affects all models (cross-model verified on Qwen2.5-7B and 9G-8B-thinking).
 
 Graph mode "just worked" once flash-attn worked. The handoff's Bug 2a (ATen `index_select_out` for embedding) doesn't apply because our embedding op already uses a native CUDA kernel via `op::embedding` (with Hygon dispatch). Bug 2b (HIPStreamGuard) was already wired in the flash-attn TU.
 

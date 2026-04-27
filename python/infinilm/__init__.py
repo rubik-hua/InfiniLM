@@ -9,6 +9,10 @@ def _preload_flash_attn_global():
         marker = os.path.join(os.path.dirname(__file__), "lib", "libflash_attn_hygon_dlsym.so")
         if not os.path.exists(marker):
             return
+        # libinfinicore + flash_attn_hygon_dlsym both link libtorch; import it
+        # first so libtorch_*.so are RTLD_GLOBAL-loaded before our dlopens.
+        # Replaces the manual LD_LIBRARY_PATH=$(...torch/lib) workaround.
+        import torch  # noqa: F401
         spec = importlib.util.find_spec("flash_attn_2_cuda")
         if spec is None or not spec.origin:
             return

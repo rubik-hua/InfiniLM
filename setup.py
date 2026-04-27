@@ -98,10 +98,58 @@ def _ensure_flash_attn_dir() -> Path | None:
     return d
 
 
+def _source_dtk_env():
+    """When building for Hygon, source DTK's env scripts into os.environ so
+    cmake sees ROCM_PATH, CUDA_HOME, PATH, LD_LIBRARY_PATH, *_INCLUDE_PATH.
+    Idempotent: if the caller already sourced them, ROCM_PATH is set and we
+    return without re-running.
+    """
+    if os.environ.get("ROCM_PATH"):
+        return
+
+    dtk_root = Path(os.environ.get("INFINI_HYGON_DTK_ROOT", "/opt/dtk"))
+    env_sh = dtk_root / "env.sh"
+    cuda_env_sh = dtk_root / "cuda" / "cuda-12" / "env.sh"
+
+    missing = [str(p) for p in (env_sh, cuda_env_sh) if not p.is_file()]
+    if missing:
+        raise RuntimeError(
+            f"INFINILM_ENABLE_HYGON=1 but DTK env scripts not found: {missing}. "
+            f"Set INFINI_HYGON_DTK_ROOT (default /opt/dtk) or source manually."
+        )
+
+    print(f"[InfiniLM] sourcing DTK env from {dtk_root}")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            # source noise -> stderr; env -0 -> stdout. set -e fails fast on
+            # broken env scripts; Python captures the two streams separately
+            # so source output never contaminates env parsing.
+            f"set -e; {{ source {env_sh}; source {cuda_env_sh}; }} 1>&2; env -0",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    for entry in result.stdout.split(b"\0"):
+        if not entry:
+            continue
+        key, _, val = entry.decode().partition("=")
+        if key:
+            os.environ[key] = val
+
+
 def build_cpp_module():
     BUILD_DIR.mkdir(exist_ok=True)
 
     enable_hygon = _env_bool("INFINILM_ENABLE_HYGON")
+    if enable_hygon:
+        _source_dtk_env()
+    elif os.path.isdir("/opt/dtk"):
+        print(
+            "[InfiniLM] /opt/dtk detected but INFINILM_ENABLE_HYGON not set — "
+            "building NVIDIA target. Set INFINILM_ENABLE_HYGON=1 for Hygon DCU."
+        )
 
     cmake_args = [
         "cmake",
