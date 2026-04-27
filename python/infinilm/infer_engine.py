@@ -338,3 +338,18 @@ class InferEngine(_infinilm.InferEngine):
     def load_state_dict(self, state_dict, strict=None):
         for name, param in state_dict.items():
             super().load_param(name, param._underlying)
+
+    def get_kv_cache(self) -> list[list[infinicore.Tensor]]:
+        """
+        get per-rank kv cache.
+        """
+        kv_cache_list = super().get_kv_cache()
+        infinicore.sync_device()
+
+        result = []
+        for rank_idx, kv_caches_per_rank in enumerate(kv_cache_list):
+            result_rank = []
+            for layer_idx, layer_kv in enumerate(kv_caches_per_rank):
+                result_rank.append(infinicore.Tensor(layer_kv))
+            result.append(result_rank)
+        return result

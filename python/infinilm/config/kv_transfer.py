@@ -5,6 +5,7 @@
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+import os
 
 KV_ROLE_CHOICES = frozenset({"kv_producer", "kv_consumer"})
 
@@ -42,3 +43,6 @@ class KVTransferConfig:
 
         if self.engine_id is None:
             self.engine_id = f"{self.kv_role}_" + str(uuid.uuid4())
+
+        # TODO : force use tcp for mooncake
+        os.environ["MC_FORCE_TCP"] = True

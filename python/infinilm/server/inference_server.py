@@ -12,11 +12,13 @@ import uvicorn
 import logging
 import os
 import asyncio
+from typing import Optional
 from infinilm.base_config import BaseConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from infinilm.llm import AsyncLLMEngine, SamplingParams, FinishReason
+from infinilm.config.kv_transfer import KVTransferConfig
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,8 @@ class InferenceServer:
         enable_graph: bool = False,
         attn_backend: str = "default",
         ignore_eos: bool = False,
+        # PD separation
+        kv_transfer_config: Optional[KVTransferConfig] = None,
     ):
         """Initialize inference server.
 
@@ -155,6 +159,8 @@ class InferenceServer:
 
         self.engine: AsyncLLMEngine = None
 
+        self.kv_transfer_config = kv_transfer_config
+
     def start(self):
         """Start the HTTP server."""
         app = self._create_app()
@@ -183,6 +189,7 @@ class InferenceServer:
                 top_k=self.top_k,
                 enable_graph=self.enable_graph,
                 attn_backend=self.attn_backend,
+                kv_transfer_config=self.kv_transfer_config,
             )
             self.engine.start()
             logger.info(f"Engine initialized with model at {self.model_path}")
@@ -550,10 +557,28 @@ def setup_logging(log_level: str = "INFO"):
     )
 
 
+def parse_kv_transfer_config(kv_transfer_config_str: str) -> KVTransferConfig:
+    """Parse JSON string into KVTransferConfig."""
+    kv_dict = json.loads(kv_transfer_config_str)
+    if not isinstance(kv_dict, dict):
+        raise ValueError("--kv-transfer-config must be a JSON object")
+
+    return KVTransferConfig(
+        kv_connector=kv_dict.get("kv_connector", None),
+        engine_id=kv_dict.get("engine_id", None),
+        kv_role=kv_dict.get("kv_role", None),
+        kv_connector_extra_config=kv_dict.get("kv_connector_extra_config", None),
+    )
+
+
 def main():
     cfg = BaseConfig()
     setup_logging(cfg.log_level)
     device = cfg.get_device_str(cfg.device)
+
+    kv_transfer_config = None
+    if cfg.kv_transfer_config:
+        kv_transfer_config = parse_kv_transfer_config(cfg.kv_transfer_config)
 
     server = InferenceServer(
         model_path=cfg.model,
@@ -574,6 +599,7 @@ def main():
         enable_graph=cfg.enable_graph,
         attn_backend=cfg.attn,
         ignore_eos=cfg.ignore_eos,
+        kv_transfer_config=kv_transfer_config,
     )
     server.start()
 

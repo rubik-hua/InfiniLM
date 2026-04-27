@@ -12,7 +12,6 @@ import uuid
 import logging
 import threading
 from typing import List, Optional, Union, AsyncIterator
-from dataclasses import dataclass
 
 from transformers import AutoTokenizer
 from tokenizers import decoders as _dec
@@ -26,54 +25,14 @@ from infinilm.llm.request import (
     FinishReason,
 )
 from infinilm.llm.sampling_params import SamplingParams
-from infinilm.llm.scheduler import Scheduler
+from infinilm.llm.scheduler import Scheduler, SchedulerOutput
 from infinilm.llm.static_scheduler import StaticScheduler
-
-from infinilm.distributed import DistConfig
-from infinilm.infer_engine import InferEngine
-from infinilm.cache.cache import PagedKVCacheConfig, StaticKVCacheConfig
-from infinilm.modeling_utils import load_model_state_dict_by_file
+from infinilm.config.kv_transfer import KVTransferConfig
+from infinilm.llm.model_runner.model_runner import ModelRunner
+from infinilm.llm.engine_config import EngineConfig
+from infinilm.kv_connector import create_kv_transfer, KVConnectorRole
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class EngineConfig:
-    """Configuration for LLM Engine.
-
-    Attributes:
-        model_path: Path to the model directory.
-        device: Device type string ('cpu', 'cuda', 'mlu', etc.).
-        dtype: Data type string ('float16', 'bfloat16', 'float32').
-        tensor_parallel_size: Number of devices for tensor parallelism.
-        cache_type: Cache type ('paged' or 'static').
-        max_batch_size: Maximum batch size for inference (only for paged cache).
-        max_tokens: Default maximum tokens to generate.
-        num_blocks: Number of KV cache blocks (only for paged cache).
-        block_size: Size of each KV cache block (only for paged cache).
-        max_cache_len: Maximum sequence length (only for static cache).
-        temperature: Default sampling temperature.
-        top_p: Default top-p sampling parameter.
-        top_k: Default top-k sampling parameter.
-        enable_graph: Whether to enable graph compiling.
-        attn_backend: Attention backend to use ('default', 'flash-attn').
-    """
-
-    model_path: str
-    device: str = "cuda"
-    dtype: str = "float16"
-    tensor_parallel_size: int = 1
-    cache_type: str = "paged"  # "paged" or "static"
-    max_batch_size: int = 16
-    max_tokens: int = 4096
-    num_blocks: int = 512
-    block_size: int = 256
-    max_cache_len: int = 4096
-    temperature: float = 1.0
-    top_p: float = 0.8
-    top_k: int = 1
-    enable_graph: bool = False
-    attn_backend: str = "default"
 
 
 class LLMEngine:
@@ -84,40 +43,15 @@ class LLMEngine:
 
         # Initialize device and dtype
         self._init_device()
-
-        # Initialize model engine
-        self.model_engine = InferEngine(
-            model_path=config.model_path,
-            device=self.device,
-            distributed_config=DistConfig(config.tensor_parallel_size),
-            enable_graph_compiling=config.enable_graph,
-            attention_backend=config.attn_backend,
-        )
-
-        # Load model weights
-        load_model_state_dict_by_file(
-            self.model_engine, config.model_path, dtype=self.model_engine.dtype
-        )
-
-        # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.model_path, trust_remote_code=True
-        )
-        self._fix_tokenizer_decoder()
+        self.model_runner = ModelRunner(config)
 
         # Initialize KV cache based on cache type
         if config.cache_type == "static":
-            cache_config = StaticKVCacheConfig(
-                max_batch_size=1, max_cache_len=config.max_cache_len
-            )
             self.scheduler = StaticScheduler(max_cache_len=config.max_cache_len)
             logger.info(
                 f"Using Static KV Cache with max_cache_len={config.max_cache_len}"
             )
         elif config.cache_type == "paged":
-            cache_config = PagedKVCacheConfig(
-                num_blocks=config.num_blocks, block_size=config.block_size
-            )
             self.scheduler = Scheduler(
                 max_batch_size=config.max_batch_size,
                 num_blocks=config.num_blocks,
@@ -127,13 +61,21 @@ class LLMEngine:
         else:
             raise ValueError(f"Unsupported cache_type: {config.cache_type}")
 
-        self.model_engine.reset_cache(cache_config)
+        # Initialize tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.model_path, trust_remote_code=True
+        )
+        self._fix_tokenizer_decoder()
+
         self.cache_type = config.cache_type
 
         # Get EOS token IDs from model config
-        self.eos_token_ids = self.model_engine.eos_token_id or []
+        self.eos_token_ids = self.model_runner.eos_token_id or []
         if isinstance(self.eos_token_ids, int):
             self.eos_token_ids = [self.eos_token_ids]
+
+        # prefill separation
+        self.kv_connector = None
 
         logger.info(
             f"LLMEngine initialized with model at {config.model_path} "
@@ -168,7 +110,7 @@ class LLMEngine:
 
     def _fix_tokenizer_decoder(self):
         """Fix tokenizer decoder for llama models."""
-        if "llama" in self.model_engine.model_type.lower():
+        if "llama" in self.model_runner.model_type.lower():
             backend = getattr(self.tokenizer, "backend_tokenizer", None)
             target = getattr(backend, "_tokenizer", backend)
             norm = getattr(target, "normalizer", None)
@@ -203,15 +145,9 @@ class LLMEngine:
         if scheduler_output is None or not scheduler_output.scheduled_requests:
             return [], []
 
-        # Build model inputs
-        model_input_dict = scheduler_output.build_model_inputs(
-            self.config.temperature, self.config.top_p, self.config.top_k
-        )
-        model_input = self._prepare_model_input(model_input_dict)
-
-        # Run inference
-        sampled_tokens = self.model_engine.forward(**model_input)
-        sampled_tokens_list = sampled_tokens.to_numpy().tolist()
+        # Execute model
+        runner_output = self.model_runner.execute_model(scheduler_output)
+        sampled_tokens_list = runner_output.sampled_token_ids
 
         # Update request status
         pending = self._update_requests(
@@ -221,28 +157,6 @@ class LLMEngine:
         )
 
         return scheduler_output.scheduled_requests, pending
-
-    def _prepare_model_input(self, model_input_dict: dict) -> dict:
-        """Convert model input dict to infinicore tensors."""
-        model_input = {}
-        for key, value in model_input_dict.items():
-            if value is None:
-                # Skip None values (block_tables/slot_mapping for static cache)
-                model_input[key] = None
-            elif key in ["input_ids", "position_ids", "slot_mapping"]:
-                model_input[key] = infinicore.from_list(value, dtype=infinicore.int64)
-            elif key in [
-                "past_kv_lengths",
-                "total_kv_lengths",
-                "input_offsets",
-                "cu_seqlens",
-                "block_tables",
-            ]:
-                model_input[key] = infinicore.from_list(value, dtype=infinicore.int32)
-            else:
-                # temperature, top_k, top_p, etc.
-                model_input[key] = value
-        return model_input
 
     def _update_requests(
         self,
@@ -553,6 +467,8 @@ class AsyncLLMEngine:
         top_k: int = 1,
         enable_graph: bool = False,
         attn_backend: str = "default",
+        # PD separation
+        kv_transfer_config: Optional[KVTransferConfig] = None,
     ):
         """Initialize AsyncLLMEngine.
 
@@ -589,6 +505,7 @@ class AsyncLLMEngine:
             top_k=top_k,
             enable_graph=enable_graph,
             attn_backend=attn_backend,
+            kv_transfer_config=kv_transfer_config,
         )
         self.engine = LLMEngine(config)
         self.config = config

@@ -154,6 +154,9 @@ class InferenceRequest:
         self._stream_last_yielded_length: int = 0
         self._pending_token_offset: int = 0
 
+        # PD
+        self.kv_transfer_params: Optional[dict] = None
+
     @property
     def output_queue(self) -> janus.Queue:
         """Lazy initialization of output queue."""

@@ -5,7 +5,8 @@ Scheduler - Request scheduling and batch management with Paged Attention KV Cach
 import queue
 import janus
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
+
 from infinilm.llm.request import RequestStatus, InferenceRequest
 from infinilm.llm.cache_manager import BlockManager
 
@@ -19,10 +20,12 @@ class SchedulerOutput:
         self,
         scheduled_requests: List[InferenceRequest],
         is_prefill: bool = False,
+        kv_connector_metadata: Any | None = None,
     ):
         self.scheduled_requests = scheduled_requests
         self.num_requests = len(scheduled_requests)
         self.is_prefill = is_prefill
+        self.kv_connector_metadata = kv_connector_metadata
 
     def build_model_inputs(
         self, temperature: float = 1.0, top_p: float = 0.8, top_k: int = 1
@@ -143,9 +146,13 @@ class Scheduler:
         self.cache_manager = BlockManager(num_blocks=num_blocks, block_size=block_size)
         self.block_size = block_size
 
+    def set_kv_connector(self, kv_connector):
+        self.kv_connector = kv_connector
+
     def add_request(self, request: InferenceRequest):
         if request is not None:
             request.status = RequestStatus.WAITING
+
             self.waiting_queue.sync_q.put(request)
 
     def schedule(self) -> Optional[SchedulerOutput]:
@@ -192,9 +199,13 @@ class Scheduler:
         # Return prefill batch if any waiting requests were scheduled
         if scheduled_requests:
             is_prefill = True
+
+            connector_metadata = None
+
             return SchedulerOutput(
                 scheduled_requests=scheduled_requests,
                 is_prefill=is_prefill,
+                kv_connector_metadata=connector_metadata,
             )
 
         # Process Running queue (decode phase)
