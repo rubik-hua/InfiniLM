@@ -18,6 +18,11 @@ public:
     size_t head_dim() const { return head_dim_; }
     size_t hidden_size() const { return hidden_size_; }
 
+    void get_qkv_weight_info() const {
+        // qkv_proj_->get_qkv_weight_info();
+        return;
+    }
+
 private:
     infinicore::Tensor forward_static_(const infinicore::Tensor &positions,
                                        const infinicore::Tensor &hidden_states) const;

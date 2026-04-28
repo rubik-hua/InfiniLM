@@ -39,6 +39,10 @@ void Qwen3NextForCausalLM::reset_cache(const cache::CacheConfig *cache_config) {
     kv_cache_vec = std::move(new_kv_cache_vec);
 }
 
+void Qwen3NextForCausalLM::process_weights_after_loading() const {
+    return;
+}
+
 std::shared_ptr<infinilm::config::ModelConfig> create_qwen3_next_model_config(std::shared_ptr<infinilm::config::ModelConfig> model_config) {
     const std::string model_type = model_config->get<std::string>("model_type");
     if ("qwen3_next" != model_type) {

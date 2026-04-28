@@ -175,6 +175,7 @@ def load_model_state_dict_by_file(
                 model_param_infini[key] = infinicore.from_torch(model_param[key])
             model.load_state_dict(model_param_infini, strict=False)
             infinicore.sync_device()
+        model.process_weights_after_loading()
 
     elif os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
         file_path = os.path.join(model_path, "pytorch_model.bin")

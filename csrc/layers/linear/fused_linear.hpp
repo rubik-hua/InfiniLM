@@ -1,8 +1,8 @@
 #pragma once
+#include "../../engine/distributed/communication_group.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/quantization.hpp"
-
-#include "../../engine/distributed/communication_group.hpp"
+#include <iostream>
 
 namespace infinilm::layers::linear {
 class QKVParallelLinear : public infinicore::nn::ColumnParallelLinear {
@@ -77,9 +77,23 @@ public:
     infinicore::nn::Parameter get_k_bias() const;
     infinicore::nn::Parameter get_v_bias() const;
 
+    infinicore::nn::Parameter get_q_g_idx_gptq() const;
+    infinicore::nn::Parameter get_k_g_idx_gptq() const;
+    infinicore::nn::Parameter get_v_g_idx_gptq() const;
+
     bool has_q_bias() const;
     bool has_k_bias() const;
     bool has_v_bias() const;
+
+    void get_qkv_weight_info() {
+        std::cout << "weight: " << this->weight_->info() << std::endl;
+        weight_->debug();
+        std::cout << "weight_scale: " << this->weight_scale_->info() << std::endl;
+        weight_scale_->debug();
+        std::cout << "weight_zeros: " << this->weight_zeros_->info() << std::endl;
+        weight_zeros_->debug();
+        std::cout << "gidx: " << this->gidx_->info() << std::endl;
+    }
 
 private:
     static size_t calculate_kv_replicas(size_t num_k_head, size_t tp_size) {
@@ -177,6 +191,10 @@ public:
 
     infinicore::nn::Parameter get_gate_weight_zeros_awq() const;
 
+    infinicore::nn::Parameter get_gate_g_idx_gptq() const;
+
+    infinicore::nn::Parameter get_up_g_idx_gptq() const;
+
     bool has_gate_bias() const;
 
     bool has_up_bias() const;
@@ -263,6 +281,44 @@ private:
     this->register_parameter(std::string(up_name) + ".qweight", name##_->get_up_weight_awq());          \
     this->register_parameter(std::string(up_name) + ".qzeros", name##_->get_up_weight_zeros_awq());     \
     this->register_parameter(std::string(up_name) + ".scales", name##_->get_up_weight_scale_awq());     \
+    if (name##_->has_gate_bias())                                                                       \
+        this->register_parameter(std::string(gate_name) + ".bias", name##_->get_gate_bias());           \
+    if (name##_->has_up_bias())                                                                         \
+        this->register_parameter(std::string(up_name) + ".bias", name##_->get_up_bias());
+
+#define INFINILM_QKV_LINEAR_W4A16GPTQ_INIT(name, q_name, k_name, v_name, ...)                                 \
+    name##_ = std::make_shared<layers::linear::QKVParallelLinear>(__VA_ARGS__);                               \
+    auto gptq_ptr = std::static_pointer_cast<infinicore::quantization::GPTQ_QY>(name##_->get_quantization()); \
+    int packing_num = gptq_ptr->get_packing_num();                                                            \
+    this->register_parameter(std::string(q_name) + ".qweight", name##_->get_q_weight_awq(1));                 \
+    this->register_parameter(std::string(q_name) + ".qzeros", name##_->get_q_weight_zeros_awq(8));            \
+    this->register_parameter(std::string(q_name) + ".scales", name##_->get_q_weight_scale_awq(1));            \
+    this->register_parameter(std::string(q_name) + ".g_idx", name##_->get_q_g_idx_gptq());                    \
+    this->register_parameter(std::string(k_name) + ".qweight", name##_->get_k_weight_awq(1));                 \
+    this->register_parameter(std::string(k_name) + ".qzeros", name##_->get_k_weight_zeros_awq(8));            \
+    this->register_parameter(std::string(k_name) + ".scales", name##_->get_k_weight_scale_awq(1));            \
+    this->register_parameter(std::string(k_name) + ".g_idx", name##_->get_k_g_idx_gptq());                    \
+    this->register_parameter(std::string(v_name) + ".qweight", name##_->get_v_weight_awq(1));                 \
+    this->register_parameter(std::string(v_name) + ".qzeros", name##_->get_v_weight_zeros_awq(8));            \
+    this->register_parameter(std::string(v_name) + ".scales", name##_->get_v_weight_scale_awq(1));            \
+    this->register_parameter(std::string(v_name) + ".g_idx", name##_->get_v_g_idx_gptq());                    \
+    if (name##_->has_q_bias())                                                                                \
+        this->register_parameter(std::string(q_name) + ".bias", name##_->get_q_bias());                       \
+    if (name##_->has_k_bias())                                                                                \
+        this->register_parameter(std::string(k_name) + ".bias", name##_->get_k_bias());                       \
+    if (name##_->has_v_bias())                                                                                \
+        this->register_parameter(std::string(v_name) + ".bias", name##_->get_v_bias());
+
+#define INFINILM_GATE_UP_LINEAR_W4A16GPTQ_INIT(name, gate_name, up_name, ...)                           \
+    name##_ = std::make_shared<layers::linear::GateUpParallelLinear>(__VA_ARGS__);                      \
+    this->register_parameter(std::string(gate_name) + ".qweight", name##_->get_gate_weight_awq());      \
+    this->register_parameter(std::string(gate_name) + ".qzeros", name##_->get_gate_weight_zeros_awq()); \
+    this->register_parameter(std::string(gate_name) + ".scales", name##_->get_gate_weight_scale_awq()); \
+    this->register_parameter(std::string(gate_name) + ".g_idx", name##_->get_gate_g_idx_gptq());        \
+    this->register_parameter(std::string(up_name) + ".qweight", name##_->get_up_weight_awq());          \
+    this->register_parameter(std::string(up_name) + ".qzeros", name##_->get_up_weight_zeros_awq());     \
+    this->register_parameter(std::string(up_name) + ".scales", name##_->get_up_weight_scale_awq());     \
+    this->register_parameter(std::string(up_name) + ".g_idx", name##_->get_up_g_idx_gptq());            \
     if (name##_->has_gate_bias())                                                                       \
         this->register_parameter(std::string(gate_name) + ".bias", name##_->get_gate_bias());           \
     if (name##_->has_up_bias())                                                                         \

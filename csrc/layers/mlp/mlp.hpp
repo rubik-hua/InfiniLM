@@ -40,6 +40,8 @@ public:
     size_t hidden_size() const { return hidden_size_; }
     size_t intermediate_size() const { return intermediate_size_; }
 
+    void process_weights_after_loading();
+
 protected:
     INFINICORE_NN_MODULE(infinilm::layers::linear::GateUpParallelLinear, gate_up_proj);
     INFINICORE_NN_MODULE(infinilm::layers::linear::RowParallelLinear, down_proj);

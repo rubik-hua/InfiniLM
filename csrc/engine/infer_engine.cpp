@@ -97,6 +97,15 @@ void InferEngine::load_param(const std::string &name, const infinicore::Tensor &
         worker->load_param(name, param);
     }
 }
+//------------------------------------------------------
+// load_param
+//------------------------------------------------------
+void InferEngine::process_weights_after_loading() {
+    // Process the weights after loading on all workers
+    for (auto &worker : workers_) {
+        worker->process_weights_after_loading();
+    }
+}
 
 //------------------------------------------------------
 // state_dict

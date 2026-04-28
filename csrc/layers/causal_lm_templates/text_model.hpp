@@ -74,6 +74,11 @@ public:
         hidden_states = norm_->forward(hidden_states);
         return hidden_states;
     }
+    void get_attention_qkv_weight_info() const {
+        for (const auto &layer : layers_) {
+            layer->get_attention_qkv_weight_info();
+        }
+    }
 
     infinicore::Tensor forward_embeds(const infinicore::Tensor &inputs_embeds,
                                       const infinicore::Tensor &position_ids) const {

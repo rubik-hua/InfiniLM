@@ -50,6 +50,23 @@ Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config
                                   use_output_bias, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16_QY: {
+        INFINILM_QKV_LINEAR_W4A16GPTQ_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads, quantization_method, use_bias,
+                                           dtype, device, rank_info);
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method, use_output_bias,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+        break;
+    }
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16: {
+
+        INFINILM_QKV_LINEAR_W4A16GPTQ_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads, quantization_method, use_bias,
+                                           dtype, device, rank_info);
+
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method, use_output_bias,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+
+        break;
+    }
     default: {
         throw std::runtime_error("infinilm::layers::attention::Attention: unsupported quantization scheme");
         break;
@@ -141,12 +158,14 @@ infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &position_
 
     // 1. Project Q, K, V
     auto [q, k, v] = qkv_proj_->forward_split(hidden_states_mutable);
+    // qkv_proj_->get_qkv_weight_info();
+    // qkv_proj_->get_qkv_weight_info();
 
     // 2. Reshape for multi-head attention
     auto q_reshaped = q->view({seq_len, num_attention_heads_, head_dim_});
     auto k_reshaped = k->view({seq_len, num_key_value_heads_, head_dim_});
     auto v_reshaped = v->view({seq_len, num_key_value_heads_, head_dim_});
-
+    // std::exit(0);
     // 3. Prepare position_ids for RoPE
     auto pos_shape = position_ids->shape();
     infinicore::Tensor pos_ids_for_rope = position_ids;
@@ -169,5 +188,14 @@ infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &position_
     // 6. Project output
     auto output = o_proj_->forward(attn_output);
     return output;
+}
+
+void Attention::get_attention_qkv_weight_info() const {
+    qkv_proj_->get_qkv_weight_info();
+}
+
+void Attention::process_weights_after_loading() {
+    qkv_proj_->process_weights_after_loading();
+    o_proj_->process_weights_after_loading();
 }
 } // namespace infinilm::layers::attention

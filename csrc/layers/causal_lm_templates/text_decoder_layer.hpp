@@ -61,6 +61,10 @@ public:
 
     size_t layer_idx() const { return layer_idx_; }
 
+    void get_attention_qkv_weight_info() const {
+        self_attn_->get_qkv_weight_info();
+    }
+
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, post_attention_layernorm);

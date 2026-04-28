@@ -18,6 +18,10 @@ public:
     size_t num_kv_heads() const { return num_key_value_heads_; }
     size_t head_dim() const { return head_dim_; }
     size_t hidden_size() const { return hidden_size_; }
+    void get_qkv_weight_info() const {
+        // qkv_proj_->get_qkv_weight_info();
+        return;
+    }
 
 protected:
     INFINICORE_NN_MODULE(infinilm::layers::linear::QKVParallelLinear, qkv_proj);

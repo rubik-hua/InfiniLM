@@ -60,7 +60,12 @@ LlamaMLP::LlamaMLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
         INFINICORE_NN_MODULE_INIT(down_proj, intermediate_size_, hidden_size_, this->model_config_->get_quantization_method(), use_bias_,
                                   dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
-
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16_QY:
+        INFINILM_GATE_UP_LINEAR_W4A16GPTQ_INIT(gate_up_proj, "gate_proj", "up_proj", hidden_size_, intermediate_size_, this->model_config_->get_quantization_method(), use_bias_,
+                                               dtype, device, rank_info_);
+        INFINICORE_NN_MODULE_INIT(down_proj, intermediate_size_, hidden_size_, this->model_config_->get_quantization_method(), use_bias_,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+        break;
     default:
         INFINILM_GATE_UP_LINEAR_INIT(gate_up_proj, "gate_proj", "up_proj", hidden_size_, intermediate_size_, this->model_config_->get_quantization_method(), use_bias_,
                                      dtype, device, rank_info_);

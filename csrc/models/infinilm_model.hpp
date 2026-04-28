@@ -56,6 +56,7 @@ public:
     virtual const cache::CacheConfig *get_cache_config() const {
         return cache_config_.get();
     }
+    virtual void process_weights_after_loading() const;
 
 protected:
     std::vector<infinicore::Tensor> default_allocate_kv_cache_tensors(

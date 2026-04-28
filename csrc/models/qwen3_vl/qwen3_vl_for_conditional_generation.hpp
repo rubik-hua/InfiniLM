@@ -25,6 +25,7 @@ public:
     Output forward(const Input &input) const override;
 
     void reset_cache(const cache::CacheConfig *cache_config) override;
+    void process_weights_after_loading() const override;
 
 protected:
     INFINICORE_NN_MODULE(Qwen3VLModel, model);

@@ -8,7 +8,6 @@ QuantConfig::QuantConfig(const nlohmann::json &json) : quantization_config(json)
 std::shared_ptr<infinicore::quantization::BaseQuantization>
 QuantConfig::get_quantization_method() const {
     if (quantization_config.is_null()) {
-        // return nullptr;
         return std::make_shared<infinicore::quantization::NoneQuantization>(quantization_config); // Default case if no matching scheme
     }
 
@@ -17,6 +16,9 @@ QuantConfig::get_quantization_method() const {
         return std::make_shared<infinicore::quantization::CompressedTensors>(quantization_config);
     } else if (quantization_config["quant_method"] == "awq") {
         return std::make_shared<infinicore::quantization::AWQ>(quantization_config);
+    } else if (quantization_config["quant_method"] == "gptq") {
+        // return std::make_shared<infinicore::quantization::GPTQ_QY>(quantization_config);
+        return std::make_shared<infinicore::quantization::GPTQ>(quantization_config);
     } else {
         return std::make_shared<infinicore::quantization::NoneQuantization>(quantization_config);
     }
