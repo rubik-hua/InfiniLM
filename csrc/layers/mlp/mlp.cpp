@@ -71,8 +71,4 @@ infinicore::Tensor MLP::forward(const infinicore::Tensor &hidden_states) const {
     auto output = down_proj_->forward(intermediate);
     return output;
 }
-void MLP::process_weights_after_loading() {
-    gate_up_proj_->process_weights_after_loading();
-    down_proj_->process_weights_after_loading();
-}
 } // namespace infinilm::layers::mlp

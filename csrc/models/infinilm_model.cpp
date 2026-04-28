@@ -86,8 +86,18 @@ std::vector<infinicore::Tensor> InfinilmModel::default_allocate_kv_cache_tensors
     return kv_cache_vec;
 }
 
-void InfinilmModel::process_weights_after_loading() const {
-    return;
+void InfinilmModel::process_weights_after_loading() {
+    process_weights_recursive_(this);
+}
+
+void InfinilmModel::process_weights_recursive_(infinicore::nn::Module *module) {
+    auto submodules = module->modules_dict();
+    for (auto &[name, sub] : submodules) {
+        process_weights_recursive_(sub);
+    }
+    if (auto *linear = dynamic_cast<infinicore::nn::BaseLinear *>(module)) {
+        linear->process_weights_after_loading();
+    }
 }
 
 } // namespace infinilm

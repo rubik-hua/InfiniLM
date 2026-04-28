@@ -85,16 +85,6 @@ public:
     bool has_k_bias() const;
     bool has_v_bias() const;
 
-    void get_qkv_weight_info() {
-        std::cout << "weight: " << this->weight_->info() << std::endl;
-        weight_->debug();
-        std::cout << "weight_scale: " << this->weight_scale_->info() << std::endl;
-        weight_scale_->debug();
-        std::cout << "weight_zeros: " << this->weight_zeros_->info() << std::endl;
-        weight_zeros_->debug();
-        std::cout << "gidx: " << this->gidx_->info() << std::endl;
-    }
-
 private:
     static size_t calculate_kv_replicas(size_t num_k_head, size_t tp_size) {
         if (num_k_head % tp_size == 0) {

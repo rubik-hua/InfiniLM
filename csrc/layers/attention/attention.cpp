@@ -158,14 +158,12 @@ infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &position_
 
     // 1. Project Q, K, V
     auto [q, k, v] = qkv_proj_->forward_split(hidden_states_mutable);
-    // qkv_proj_->get_qkv_weight_info();
-    // qkv_proj_->get_qkv_weight_info();
 
     // 2. Reshape for multi-head attention
     auto q_reshaped = q->view({seq_len, num_attention_heads_, head_dim_});
     auto k_reshaped = k->view({seq_len, num_key_value_heads_, head_dim_});
     auto v_reshaped = v->view({seq_len, num_key_value_heads_, head_dim_});
-    // std::exit(0);
+
     // 3. Prepare position_ids for RoPE
     auto pos_shape = position_ids->shape();
     infinicore::Tensor pos_ids_for_rope = position_ids;
@@ -190,12 +188,4 @@ infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &position_
     return output;
 }
 
-void Attention::get_attention_qkv_weight_info() const {
-    qkv_proj_->get_qkv_weight_info();
-}
-
-void Attention::process_weights_after_loading() {
-    qkv_proj_->process_weights_after_loading();
-    o_proj_->process_weights_after_loading();
-}
 } // namespace infinilm::layers::attention

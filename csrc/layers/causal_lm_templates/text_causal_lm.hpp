@@ -1,11 +1,8 @@
 #pragma once
 
 #include "../../models/infinilm_model.hpp"
-#include "../attention/attention.hpp"
 #include "../linear/linear.hpp"
-#include "../mlp/mlp.hpp"
 #include "infinicore/device.hpp"
-#include "iostream"
 
 namespace infinilm::layers::causal_lm_templates {
 

@@ -22,12 +22,6 @@ public:
     infinicore::Tensor forward(const infinicore::Tensor &positions,
                                infinicore::Tensor &hidden_states);
 
-public:
-    void get_attention_qkv_weight_info() const {
-        // model_->layers_.at(0)->self_attn_->get_qkv_weight_info();
-        return;
-    }
-
 protected:
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, input_layernorm);
     INFINICORE_NN_MODULE(infinicore::nn::RMSNorm, post_attention_layernorm);

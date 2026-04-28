@@ -17,13 +17,6 @@ public:
 
     void reset_cache(const cache::CacheConfig *cache_config) override;
 
-    void process_weights_after_loading() const override;
-
-    void get_attention_qkv_weight_info() const {
-        // model_->layers_.at(0)->self_attn_->get_qkv_weight_info();
-        return;
-    }
-
 protected:
     INFINICORE_NN_MODULE(Qwen3NextModel, model);
     INFINICORE_NN_MODULE(infinilm::layers::linear::ReplicatedLinear, lm_head);

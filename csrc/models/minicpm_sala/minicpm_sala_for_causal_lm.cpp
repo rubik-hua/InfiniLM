@@ -38,11 +38,6 @@ void MiniCPMSALAForCausalLM::reset_cache(const cache::CacheConfig *cache_config)
     kv_cache_vec = std::move(new_kv_cache_vec);
 }
 
-void MiniCPMSALAForCausalLM::process_weights_after_loading() const {
-
-    return;
-}
-
 std::shared_ptr<infinilm::config::ModelConfig> create_minicpm_sala_model_config(std::shared_ptr<infinilm::config::ModelConfig> model_config) {
     const std::string &model_type = model_config->get<std::string>("model_type");
     if ("minicpm_sala" != model_type) {
