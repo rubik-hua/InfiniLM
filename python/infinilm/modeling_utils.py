@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Dict, Union
 import time
 import torch
@@ -39,6 +40,125 @@ str_to_torch_dtype = {
     "F8_E4M3": torch.float8_e4m3fn,
     "F8_E5M2": torch.float8_e5m2,
 }
+
+
+def _split_first_dim(tensor, sizes, name):
+    if tensor.dim() not in (1, 2):
+        raise ValueError(f"Cannot split {name} with shape {tensor.shape}")
+    return torch.split(tensor, sizes, dim=0)
+
+
+def _remap_baichuan_weights(state_dict, hf_config):
+    hidden_size = hf_config.get("hidden_size", 4096)
+    num_heads = hf_config.get("num_attention_heads", 32)
+    per_head_dim = num_heads * (hidden_size // num_heads)
+    new_sd = {}
+
+    for key, tensor in state_dict.items():
+        wpack_match = re.match(r"(.*\.)W_pack\.(weight|bias)", key)
+        if not wpack_match:
+            new_sd[key] = tensor
+            continue
+
+        prefix = wpack_match.group(1)
+        suffix = wpack_match.group(2)
+        q, k, v = _split_first_dim(
+            tensor,
+            [per_head_dim, per_head_dim, tensor.shape[0] - 2 * per_head_dim],
+            "W_pack",
+        )
+        new_sd[f"{prefix}q_proj.{suffix}"] = q
+        new_sd[f"{prefix}k_proj.{suffix}"] = k
+        new_sd[f"{prefix}v_proj.{suffix}"] = v
+    return new_sd
+
+
+def _remap_glm4_weights(state_dict):
+    new_sd = {}
+
+    for key, tensor in state_dict.items():
+        if "gate_up_proj" not in key:
+            new_sd[key] = tensor
+            continue
+
+        base_key = key.replace(".gate_up_proj.weight", "")
+        intermediate = tensor.shape[0] // 2
+        gate, up = _split_first_dim(
+            tensor,
+            [intermediate, tensor.shape[0] - intermediate],
+            "gate_up_proj",
+        )
+        new_sd[f"{base_key}.gate_proj.weight"] = gate
+        new_sd[f"{base_key}.up_proj.weight"] = up
+    return new_sd
+
+
+def _rename_chatglm_key(key):
+    new_key = key.replace("transformer.encoder.layers.", "model.layers.")
+    new_key = new_key.replace("transformer.embedding.word_embeddings", "model.embed_tokens")
+    new_key = new_key.replace("transformer.encoder.final_layernorm", "model.norm")
+    new_key = new_key.replace("transformer.output_layer", "lm_head")
+    new_key = new_key.replace("self_attention.", "self_attn.")
+    new_key = new_key.replace("self_attn.dense", "self_attn.o_proj")
+    return new_key.replace("mlp.dense_4h_to_h", "mlp.down_proj")
+
+
+def _remap_chatglm_weights(state_dict, hf_config):
+    num_heads = hf_config.get("num_attention_heads", 32)
+    num_kv = hf_config.get("multi_query_group_num", 2)
+    head_dim = hf_config.get("kv_channels", 128)
+    ffn_hidden = hf_config.get("ffn_hidden_size", 13696)
+    q_dim = num_heads * head_dim
+    k_dim = num_kv * head_dim
+    new_sd = {}
+
+    for key, tensor in state_dict.items():
+        if "rotary_pos_emb" in key:
+            continue
+
+        new_key = _rename_chatglm_key(key)
+        if "query_key_value" in new_key:
+            suffix = "weight" if tensor.dim() == 2 else "bias"
+            q, k, v = _split_first_dim(
+                tensor,
+                [q_dim, k_dim, tensor.shape[0] - q_dim - k_dim],
+                "query_key_value",
+            )
+            base_key = new_key.rsplit(".query_key_value", 1)[0]
+            new_sd[f"{base_key}.q_proj.{suffix}"] = q
+            new_sd[f"{base_key}.k_proj.{suffix}"] = k
+            new_sd[f"{base_key}.v_proj.{suffix}"] = v
+            continue
+
+        if "dense_h_to_4h" in new_key:
+            base_key = new_key.replace(".dense_h_to_4h.weight", "")
+            gate, up = _split_first_dim(
+                tensor,
+                [ffn_hidden, tensor.shape[0] - ffn_hidden],
+                "dense_h_to_4h",
+            )
+            new_sd[f"{base_key}.gate_proj.weight"] = gate
+            new_sd[f"{base_key}.up_proj.weight"] = up
+            continue
+
+        new_sd[new_key] = tensor
+    return new_sd
+
+
+def maybe_remap_weights(state_dict, model):
+    """Remap model-specific weight names to LLaMA-compatible names."""
+    if not hasattr(model, "hf_config"):
+        return state_dict
+
+    hf_config = model.hf_config
+    model_type = hf_config.get("model_type", "")
+    if model_type == "baichuan":
+        return _remap_baichuan_weights(state_dict, hf_config)
+    if model_type == "glm4":
+        return _remap_glm4_weights(state_dict)
+    if model_type == "chatglm":
+        return _remap_chatglm_weights(state_dict, hf_config)
+    return state_dict
 
 
 def check_parameters(model_keys: list, already_loaded_keys: list):
@@ -165,6 +285,8 @@ def load_model_state_dict_by_file(
             model_param = load_state_dict(
                 file_path, device=torch_device, dtype=torch_dtype
             )
+            # Remap model-specific weight names (e.g., baichuan W_pack -> q/k/v_proj)
+            model_param = maybe_remap_weights(model_param, model)
             already_loaded_keys.extend(model_param.keys())
 
             # --------------------------------------------------------- #
@@ -179,6 +301,9 @@ def load_model_state_dict_by_file(
     elif os.path.exists(os.path.join(model_path, "pytorch_model.bin")):
         file_path = os.path.join(model_path, "pytorch_model.bin")
         model_params = torch.load(file_path, weights_only=True, map_location="cpu")
+
+        # Remap model-specific weight names (e.g., baichuan W_pack -> q/k/v_proj)
+        model_params = maybe_remap_weights(model_params, model)
 
         model_param_infini = {}
         for key in model_params.keys():
