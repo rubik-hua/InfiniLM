@@ -1,6 +1,6 @@
 #include "chatglm_for_causal_lm.hpp"
-#include "../../models/models_registry.hpp"
-#include "../../models/llama/llama_for_causal_lm.hpp"
+#include "../llama/llama_for_causal_lm.hpp"
+#include "../models_registry.hpp"
 
 namespace infinilm::models::chatglm {
 

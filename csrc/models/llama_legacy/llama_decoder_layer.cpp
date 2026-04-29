@@ -69,6 +69,20 @@ LlamaDecoderLayer::forward(infinicore::Tensor &hidden_states,
                            std::optional<infinicore::Tensor> cu_seqlens,
                            std::optional<infinicore::Tensor> block_tables,
                            std::optional<infinicore::Tensor> slot_mapping) const {
+    if (use_glm4_post_norms_) {
+        hidden_states = forward_naive(
+            hidden_states,
+            position_ids,
+            kv_cache,
+            past_sequence_lengths,
+            total_sequence_lengths,
+            input_offsets,
+            cu_seqlens,
+            block_tables,
+            slot_mapping);
+        return std::make_tuple(hidden_states, residual);
+    }
+
     // 1. Attention layer normalization
     input_layernorm_->forward_inplace(hidden_states, residual);
 

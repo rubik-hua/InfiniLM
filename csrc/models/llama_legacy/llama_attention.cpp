@@ -1,6 +1,7 @@
 #include "llama_attention.hpp"
 
 #include "../../utils.hpp"
+#include "llama_utils.hpp"
 #include "infinicore/nn/linear.hpp"
 #include "infinicore/nn/rope.hpp"
 #include "infinicore/ops.hpp"
@@ -10,7 +11,6 @@
 #include "infinicore/ops/per_tensor_dequant_i8.hpp"
 #include "infinicore/ops/per_tensor_quant_i8.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <optional>
@@ -19,24 +19,6 @@
 #include <vector>
 
 namespace infinilm::models::llama_legacy {
-
-namespace {
-
-size_t get_rotary_dim(size_t head_dim, double partial_rotary_factor) {
-    if (partial_rotary_factor <= 0.0 || partial_rotary_factor >= 1.0) {
-        return head_dim;
-    }
-
-    size_t rotary_dim = static_cast<size_t>(std::llround(
-        static_cast<double>(head_dim) * partial_rotary_factor));
-    rotary_dim = std::clamp(rotary_dim, static_cast<size_t>(2), head_dim);
-    if (rotary_dim % 2 != 0) {
-        rotary_dim -= 1;
-    }
-    return std::max(rotary_dim, static_cast<size_t>(2));
-}
-
-} // namespace
 
 /**
  * @deprecated This function is deprecated and will be REMOVED in the next major release (v0.2.0).

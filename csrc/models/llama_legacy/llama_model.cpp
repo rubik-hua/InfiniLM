@@ -1,4 +1,5 @@
 #include "llama_model.hpp"
+#include "llama_utils.hpp"
 #include "infinicore/nn/embedding.hpp"
 #include "infinicore/nn/rmsnorm.hpp"
 #include "infinicore/nn/rope.hpp"
@@ -9,25 +10,15 @@ namespace infinilm::models::llama_legacy {
 
 namespace {
 
-size_t get_rotary_dim(size_t head_dim, double partial_rotary_factor) {
-    if (partial_rotary_factor <= 0.0 || partial_rotary_factor >= 1.0) {
-        return head_dim;
-    }
-
-    size_t rotary_dim = static_cast<size_t>(std::llround(
-        static_cast<double>(head_dim) * partial_rotary_factor));
-    rotary_dim = std::clamp(rotary_dim, static_cast<size_t>(2), head_dim);
-    if (rotary_dim % 2 != 0) {
-        rotary_dim -= 1;
-    }
-    return std::max(rotary_dim, static_cast<size_t>(2));
-}
-
 infinicore::nn::RoPE::Algo get_rope_algo(const std::string &model_type) {
     if (model_type == "chatglm" || model_type == "glm4") {
         return infinicore::nn::RoPE::Algo::GPT_J;
     }
     return infinicore::nn::RoPE::Algo::GPT_NEOX;
+}
+
+bool uses_naive_residual_path(const std::shared_ptr<infinilm::config::ModelConfig> &model_config) {
+    return model_config != nullptr && model_config->get<std::string>("model_type") == "glm4";
 }
 
 } // namespace
@@ -125,22 +116,6 @@ infinicore::Tensor LlamaModel::forward(const infinicore::Tensor &input_ids,
     // 1. Embed tokens: input_ids -> [batch, seq_len, hidden_size]
     auto hidden_states = embed_tokens_->forward(input_ids);
 
-    if (model_config_ != nullptr && model_config_->get<std::string>("model_type") == "glm4") {
-        for (auto &layer : layers_) {
-            hidden_states = layer->forward_naive(
-                hidden_states,
-                position_ids,
-                kv_cache_,
-                past_sequence_lengths,
-                total_sequence_lengths,
-                input_offsets,
-                cu_seqlens,
-                block_tables,
-                slot_mapping);
-        }
-        return norm_->forward(hidden_states);
-    }
-
     // 2. Process through all decoder layers
     size_t num_layers = layers_.size();
     infinicore::Tensor residual;
@@ -156,6 +131,10 @@ infinicore::Tensor LlamaModel::forward(const infinicore::Tensor &input_ids,
             cu_seqlens,
             block_tables,
             slot_mapping);
+    }
+
+    if (uses_naive_residual_path(model_config_)) {
+        return norm_->forward(hidden_states);
     }
 
     norm_->forward_inplace(hidden_states, residual);
@@ -177,6 +156,11 @@ infinicore::Tensor LlamaModel::forward_embeds(const infinicore::Tensor &inputs_e
     for (size_t i = 0; i < num_layers; ++i) {
         layers_.at(i)->forward(hidden_states, residual, position_ids, kv_cache_, past_sequence_lengths, total_sequence_lengths, input_offsets, cu_seqlens, block_tables, slot_mapping);
     }
+
+    if (uses_naive_residual_path(model_config_)) {
+        return norm_->forward(hidden_states);
+    }
+
     norm_->forward_inplace(hidden_states, residual);
 
     return hidden_states;
