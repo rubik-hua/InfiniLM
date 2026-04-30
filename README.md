@@ -45,7 +45,7 @@
   - 单次推理测试
     - llama示例
     ```bash
-    python examples/jiuge.py --device [cpu | nvidia | qy | metax | moore | iluvatar | ali | cambricon | hygon] --model=<path/to/model_dir>
+    python examples/test_infer.py --device [cpu | nvidia | qy | metax | moore | iluvatar | ali | cambricon | hygon] --model=<path/to/model_dir>
     ```
     - 例如：
     ```bash
@@ -54,12 +54,12 @@
   - 分布式推理测试
       - 9g示例
       ```bash
-    python examples/jiuge.py [-- device nvidia] --model=<path/to/model> --backend=cpp --tp=NDEV --batch-size=MAX_BATCH
+    python examples/test_infer.py [-- device nvidia] --model=<path/to/model> --backend=cpp --tp=NDEV --batch-size=MAX_BATCH
     ```
 
     - 例如： 9G7B模型，cpp后端，batch_size为16，4卡分布式
     ```bash
-    python examples/jiuge.py --device nvidia --model=/models/9G7B_MHA/ --backend=cpp --tp=4 --batch-size=16
+    python examples/test_infer.py --device nvidia --model=/models/9G7B_MHA/ --backend=cpp --tp=4 --batch-size=16
     ```
 
 
@@ -77,6 +77,11 @@
     - 多卡分布式示例：
       ```bash
       CUDA_VISIBLE_DEVICES=0,1,2,3 python python/infinilm/server/inference_server.py --device nvidia --model=/models/9G7B_MHA/ --max-new-tokens=100 --max-batch-size=32 --tp=4 --temperature=1.0 --top-p=0.8 --top-k=1
+      ```
+    
+    - 使用paged attention, flash attention后端，cuda graph等功能：
+      ```bash
+      CUDA_VISIBLE_DEVICES=0,1,2,3 python python/infinilm/server/inference_server.py --device nvidia --model=/models/9G7B_MHA/ --enable-paged-attn --attn=flash-atten --enable-graph
       ```
     
     - 测试推理服务性能：
