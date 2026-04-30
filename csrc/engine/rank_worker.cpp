@@ -129,6 +129,32 @@ void RankWorker::load_param(const std::string &name,
 }
 
 //------------------------------------------------------
+// process_weights_after_loading -- asynchronous
+//------------------------------------------------------
+void RankWorker::process_weights_after_loading() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // If the worker is stopping, don't submit new jobs.
+        if (should_exit_) {
+            throw std::runtime_error("RankWorker is closing; cannot process_weights_after_loading");
+        }
+
+        job_cmd_ = Command::PREPROCESS;
+        has_job_ = true;
+        job_done_ = false;
+    }
+    cv_.notify_all();
+
+    // Wait for job completion
+    std::unique_lock<std::mutex> lk(mutex_);
+    cv_.wait(lk, [&] { return job_done_ || should_exit_; });
+
+    if (should_exit_) {
+        throw std::runtime_error("RankWorker stopped while processing weights");
+    }
+}
+
+//------------------------------------------------------
 // state_dict --
 //------------------------------------------------------
 std::unordered_map<std::string, infinicore::nn::Parameter> RankWorker::state_dict() {
@@ -306,6 +332,8 @@ void RankWorker::thread_loop() {
                 if (local_cmd == Command::LOAD) {
                     local_param_name = pending_param_name_;
                     local_param = pending_param_;
+                } else if (local_cmd == Command::PREPROCESS) {
+
                 } else if (local_cmd == Command::RUN) {
                     local_args = pending_args_;
                 } else if (local_cmd == Command::RESET_CACHE) {
@@ -340,6 +368,27 @@ void RankWorker::thread_loop() {
                 }
                 cv_.notify_all();
 
+            } else if (local_cmd == Command::PREPROCESS) {
+                // Handle preprocess command
+                try {
+                    model_->process_weights_after_loading();
+                } catch (const std::exception &e) {
+                    {
+                        std::lock_guard<std::mutex> lk(mutex_);
+                        should_exit_ = true;
+                        job_done_ = true;
+                    }
+                    cv_.notify_all();
+                    spdlog::error("[{}] exception during process_weights_after_loading_: {}\n", info(), e.what());
+                    break;
+                }
+
+                // signal completion
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    job_done_ = true;
+                }
+                cv_.notify_all();
             } else if (local_cmd == Command::RUN) {
                 try {
                     {

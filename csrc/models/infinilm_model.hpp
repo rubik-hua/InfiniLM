@@ -3,6 +3,7 @@
 #include "../backends/attention_backends.hpp"
 #include "../cache/cache.hpp"
 #include "../config/model_config.hpp"
+#include "infinicore/nn/linear.hpp"
 #include "infinicore/nn/module.hpp"
 #include "infinicore/tensor.hpp"
 
@@ -57,6 +58,8 @@ public:
         return cache_config_.get();
     }
 
+    void process_weights_after_loading();
+
 protected:
     std::vector<infinicore::Tensor> default_allocate_kv_cache_tensors(
         const cache::CacheConfig *cache_config,
@@ -65,5 +68,8 @@ protected:
 
     std::unique_ptr<cache::CacheConfig> cache_config_;
     std::shared_ptr<infinilm::config::ModelConfig> model_config_;
+
+private:
+    static void process_weights_recursive_(infinicore::nn::Module *module);
 };
 } // namespace infinilm

@@ -33,6 +33,20 @@ MLP::MLP(std::shared_ptr<infinilm::config::ModelConfig> model_config,
                                   use_bias_, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16: {
+        INFINILM_GATE_UP_LINEAR_W4A16GPTQ_INIT(gate_up_proj, "gate_proj", "up_proj", hidden_size_, intermediate_size_, quantization_method, use_bias_,
+                                               dtype, device, rank_info);
+        INFINICORE_NN_MODULE_INIT(down_proj, intermediate_size_, hidden_size_, quantization_method, use_bias_,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+        break;
+    }
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16_QY: {
+        INFINILM_GATE_UP_LINEAR_W4A16GPTQ_INIT(gate_up_proj, "gate_proj", "up_proj", hidden_size_, intermediate_size_, quantization_method, use_bias_,
+                                               dtype, device, rank_info);
+        INFINICORE_NN_MODULE_INIT(down_proj, intermediate_size_, hidden_size_, quantization_method, use_bias_,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+        break;
+    }
     case infinicore::quantization::QuantScheme::AWQ_W4A16: {
         INFINILM_GATE_UP_LINEAR_W4A16AWQ_INIT(gate_up_proj, "gate_proj", "up_proj", hidden_size_, intermediate_size_, quantization_method,
                                               use_bias_, dtype, device, rank_info);

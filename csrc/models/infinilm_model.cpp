@@ -2,7 +2,6 @@
 #include "../backends/attention_backends.hpp"
 #include "../cache/kv_cache.hpp"
 #include "../global_state/global_state.hpp"
-
 #include <stdexcept>
 
 namespace infinilm {
@@ -85,6 +84,20 @@ std::vector<infinicore::Tensor> InfinilmModel::default_allocate_kv_cache_tensors
         throw std::runtime_error("infinilm::InfinilmModel::default_allocate_kv_cache_tensors: Unsupported attention backend: " + std::to_string(static_cast<int>(attention_backend)));
     }
     return kv_cache_vec;
+}
+
+void InfinilmModel::process_weights_after_loading() {
+    process_weights_recursive_(this);
+}
+
+void InfinilmModel::process_weights_recursive_(infinicore::nn::Module *module) {
+    auto submodules = module->modules_dict();
+    for (auto &[name, sub] : submodules) {
+        process_weights_recursive_(sub);
+    }
+    if (auto *linear = dynamic_cast<infinicore::nn::BaseLinear *>(module)) {
+        linear->process_weights_after_loading();
+    }
 }
 
 } // namespace infinilm

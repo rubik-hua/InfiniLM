@@ -25,6 +25,7 @@ class RankWorker {
     enum class Command {
         INIT,
         LOAD,
+        PREPROCESS,
         RUN,
         RESET_CACHE,
         COMPILE,
@@ -86,6 +87,8 @@ public:
     // Submit a parameter load job and wait until the load completes on the worker thread.
     void load_param(const std::string &name,
                     const infinicore::Tensor &param);
+
+    void process_weights_after_loading();
 
     // return the parameters (i.e. weights and biases).
     std::unordered_map<std::string, infinicore::nn::Parameter> state_dict();

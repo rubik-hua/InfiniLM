@@ -53,6 +53,9 @@ public:
     // Load a parameter to all workers (each can extract its shard inside RankWorker)
     void load_param(const std::string &name, const infinicore::Tensor &param);
 
+    // process the weights after loading on all workers (e.g., for quantization)
+    void process_weights_after_loading();
+
     // return the parameters (i.e. weights and biases).
     std::vector<std::unordered_map<std::string, infinicore::nn::Parameter>> state_dict();
 

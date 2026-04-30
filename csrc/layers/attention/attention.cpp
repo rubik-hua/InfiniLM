@@ -50,6 +50,23 @@ Attention::Attention(std::shared_ptr<infinilm::config::ModelConfig> model_config
                                   use_output_bias, dtype, device, tp_rank, tp_size, rank_info.comm);
         break;
     }
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16_QY: {
+        INFINILM_QKV_LINEAR_W4A16GPTQ_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads, quantization_method, use_bias,
+                                           dtype, device, rank_info);
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method, use_output_bias,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+        break;
+    }
+    case infinicore::quantization::QuantScheme::GPTQ_W4A16: {
+
+        INFINILM_QKV_LINEAR_W4A16GPTQ_INIT(qkv_proj, "q_proj", "k_proj", "v_proj", hidden_size_, head_dim_, total_num_heads, total_num_kv_heads, quantization_method, use_bias,
+                                           dtype, device, rank_info);
+
+        INFINICORE_NN_MODULE_INIT(o_proj, total_num_heads * head_dim_, hidden_size_, quantization_method, use_output_bias,
+                                  dtype, device, tp_rank, tp_size, rank_info.comm);
+
+        break;
+    }
     default: {
         throw std::runtime_error("infinilm::layers::attention::Attention: unsupported quantization scheme");
         break;
@@ -170,4 +187,5 @@ infinicore::Tensor Attention::forward_paged_(const infinicore::Tensor &position_
     auto output = o_proj_->forward(attn_output);
     return output;
 }
+
 } // namespace infinilm::layers::attention
