@@ -22,6 +22,10 @@ std::shared_ptr<infinilm::config::ModelConfig> create_mistral_model_config(std::
         config_json["attention_bias"] = false;
     }
 
+    if (!config_json.contains("torch_dtype")) {
+        config_json["torch_dtype"] = "bfloat16";
+    }
+
     return model_config;
 }
 

@@ -86,7 +86,7 @@ class InferEngine(_infinilm.InferEngine):
 
     @property
     def dtype(self):
-        torch_dtype = self.hf_config.get("torch_dtype")
+        torch_dtype = self.hf_config.get("torch_dtype", "bfloat16")
         if torch_dtype is None:
             torch_dtype = self.hf_config.get("dtype")
         return parse_dtype(torch_dtype)
