@@ -88,7 +88,7 @@ class InferEngine(_infinilm.InferEngine):
 
     @property
     def dtype(self):
-        torch_dtype = self.hf_config.get("torch_dtype")
+        torch_dtype = self.hf_config.get("torch_dtype", "bfloat16")
         if torch_dtype is None:
             torch_dtype = self.hf_config.get("dtype")
         return parse_dtype(torch_dtype)
@@ -361,11 +361,10 @@ class InferEngine(_infinilm.InferEngine):
         super().reset_cache(cache_config)
 
     def state_dict_keyname(self):
-        return super().state_dict()[0].keys()
+        return sorted({name for state_dict in super().state_dict() for name in state_dict.keys()})
 
     def load_state_dict(self, state_dict, strict=None):
-        for name, param in state_dict.items():
-            super().load_param(name, param._underlying)
+        super().load_params({name: param._underlying for name, param in state_dict.items()})
 
     def process_weights_after_loading(self):
         super().process_weights_after_loading()
